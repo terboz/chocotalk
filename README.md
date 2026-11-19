@@ -24,8 +24,12 @@ chocotalk は、Cloudflare Workers + Durable Objects（SQLite）+ 静的アセ�
 
 ```text
 chatroom/
+├─ .github/
+│  └─ workflows/
+│     └─ deploy.yml
 ├─ .gitignore
 ├─ package.json
+├─ package-lock.json
 ├─ wrangler.toml
 ├─ src/
 │  └─ worker.js
@@ -121,6 +125,16 @@ LAN IP の `http` では、Service Worker や通知が制限される場合が�
    ```
 
 初回デプロイ時に、`wrangler.toml` の migration（`v1`）が適用され、`Room` と `Directory` が SQLite の Durable Object として作成されます。
+
+### GitHub への push で自動デプロイ（GitHub Actions）
+
+- `main` ブランチへの push で `.github/workflows/deploy.yml` が実行され、`wrangler deploy` により自動デプロイされます。
+- 手動実行は Actions タブの `Deploy Worker` → `Run workflow` から行えます。`main` 以外のブランチを選ぶとジョブはスキップされ、本番は更新されません。
+- 事前に GitHub リポジトリの Settings → Secrets and variables → Actions に次の2つを登録します。
+  - `CLOUDFLARE_API_TOKEN`: Cloudflare ダッシュボードの API Tokens で発行します。「Edit Cloudflare Workers」テンプレートで作成するのが確実です。日本語UIでは「アカウント / Workers スクリプト: 編集」「アカウント / アカウント設定: 読み取り」などに相当します。トークンのリソースは対象アカウントに限定してください。
+  - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare のアカウントIDです（`npx wrangler whoami` でも確認できます）。
+- **Cloudflare 側の Workers Builds（Git 連携）が有効なままだと、同じ push で二重にデプロイされ、どちらが反映されるか保証されません。** Actions 運用に切り替えたら、対象 Worker の Settings → Builds（相当の画面）で Git 連携を**必ず Disconnect** してください。
+- ワークフロー内の `wranglerVersion` は `package.json` / `package-lock.json` の wrangler と揃えてください。
 
 ### 公開 URL
 
