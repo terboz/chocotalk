@@ -3471,6 +3471,10 @@
   let scrollAfterKeyboard = false;
 
   function updateAppHeight() {
+    // iOS が入力欄フォーカス時にドキュメントを自動スクロールした場合、即座に戻す
+    if (window.scrollX !== 0 || window.scrollY !== 0) {
+      window.scrollTo(0, 0);
+    }
     const viewport = window.visualViewport;
     const rawHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
     const rawTop = viewport ? viewport.offsetTop : 0;
@@ -3543,16 +3547,28 @@
     ensureViewportWatch(1200);
   }
 
+  function handleWindowScroll() {
+    if (window.scrollX !== 0 || window.scrollY !== 0) {
+      window.scrollTo(0, 0);
+    }
+    updateAppHeight();
+    ensureViewportWatch(1200);
+  }
+
   function handleFocusChange(event) {
     const target = event.target;
     if (!target) return;
     const tag = target.tagName;
     if (tag !== "INPUT" && tag !== "TEXTAREA") return;
+    if (event.type === "focusin") {
+      updateAppHeight();
+    }
     ensureViewportWatch(event.type === "focusin" ? 3000 : 1500);
   }
 
   function bindAppHeight() {
     updateAppHeight();
+    window.addEventListener("scroll", handleWindowScroll, { passive: true });
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("orientationchange", handleViewportChange);
     document.addEventListener("focusin", handleFocusChange);
