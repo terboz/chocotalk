@@ -69,6 +69,7 @@
     menuNameInput: null,
     closedOverlay: null,
     qrLayer: null,
+    scanLayer: null,
     lightbox: null,
     toastStack: null
   };
@@ -460,6 +461,7 @@
   function applyRoute() {
     closeMenu();
     closeQrDialog();
+    closeQrScanner();
     closeLightbox();
     hideStampPopover();
     closeRoomNotifications();
@@ -623,6 +625,13 @@
       attrs: { type: "submit" },
       text: "参加する"
     });
+    const scanButton = h("button", {
+      className: "btn btn-ghost btn-block",
+      attrs: { type: "button" },
+      text: "QRコードを読み取る"
+    });
+    scanButton.addEventListener("click", openQrScanner);
+    const isMobile = isMobileGuest();
     const joinForm = h(
       "form",
       { className: "stack-form", attrs: { novalidate: true } },
@@ -634,7 +643,7 @@
         codeInput,
         h("span", { className: "field-hint", text: "ホストから共有されたコードを入力してください。" })
       ),
-      h("div", { className: "form-footer" }, joinButton)
+      h("div", { className: "form-footer" }, isMobile ? [joinButton, scanButton] : [joinButton])
     );
 
     const joinCard = h(
@@ -1478,6 +1487,11 @@
     ui.messages = messages;
     ui.newButton = newButton;
     ui.input = textarea;
+    ui.input.addEventListener("focus", function () {
+      if (ui.messages) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      }
+    });
     ui.sendButton = sendButton;
     ui.stampButton = stampButton;
     ui.imageButton = imageButton;
@@ -3303,6 +3317,122 @@
     }
   }
 
+  let scanFrame = 0;
+  let scanStream = null;
+
+  function isMobileGuest() {
+    return window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(max-width: 700px)").matches;
+  }
+
+  function closeQrScanner() {
+    if (scanFrame) { window.cancelAnimationFrame(scanFrame); scanFrame = 0; }
+    if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; }
+    if (ui.scanLayer) { ui.scanLayer.remove(); ui.scanLayer = null; }
+  }
+
+  function handleScannedValue(text) {
+    const value = String(text || "").trim();
+    if (!value) return false;
+    const codePattern = /^[abcdefghjkmnpqrstuvwxyz23456789]{8}$/;
+    try {
+      const url = new URL(value);
+      if (url.origin === window.location.origin) {
+        const match = /^\/r\/([^/]+)\/?$/.exec(url.pathname);
+        if (match) {
+          const code = decodeURIComponent(match[1]);
+          if (codePattern.test(code)) {
+            closeQrScanner();
+            navigate("/r/" + encodeURIComponent(code));
+            return true;
+          }
+        }
+      }
+    } catch (_error) { /* raw code or foreign URL */ }
+    if (codePattern.test(value)) {
+      closeQrScanner();
+      navigate("/r/" + encodeURIComponent(value));
+      return true;
+    }
+    return false;
+  }
+
+  async function openQrScanner() {
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast("カメラを使うには HTTPS（または localhost）が必要です。");
+      return;
+    }
+    if (typeof window.jsQR !== "function") {
+      showToast("QR読み取りライブラリを読み込めませんでした。");
+      return;
+    }
+    closeQrScanner();
+
+    const layer = h("div", { className: "modal-layer scan-layer" });
+    const backdrop = h("div", { className: "modal-backdrop" });
+    backdrop.addEventListener("click", closeQrScanner);
+    const video = h("video", { className: "scan-video", attrs: { autoplay: true, muted: true, playsinline: true } });
+    const canvas = h("canvas", { className: "scan-canvas" });
+    const error = h("p", { className: "scan-error", attrs: { role: "status" }, props: { hidden: true } });
+    const closeButton = h("button", { className: "icon-btn scan-close", attrs: { type: "button", "aria-label": "QRスキャナを閉じる" }, text: "×" });
+    closeButton.addEventListener("click", closeQrScanner);
+    const manualButton = h("button", { className: "btn btn-ghost", attrs: { type: "button" }, text: "コードを手入力" });
+    manualButton.addEventListener("click", function () {
+      closeQrScanner();
+      const input = document.getElementById("home-room-code");
+      if (input) focusWithoutScroll(input);
+    });
+    const cancelButton = h("button", { className: "btn btn-ghost", attrs: { type: "button" }, text: "閉じる" });
+    cancelButton.addEventListener("click", closeQrScanner);
+    const card = h(
+      "div",
+      { className: "scan-card", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "QRコードを読み取る" } },
+      closeButton,
+      h("h2", { text: "QRコードを読み取る" }),
+      h("p", { text: "参加用QRコードをカメラに合わせてください。" }),
+      video,
+      canvas,
+      error,
+      h("div", { className: "scan-actions" }, manualButton, cancelButton)
+    );
+    layer.appendChild(backdrop);
+    layer.appendChild(card);
+    document.body.appendChild(layer);
+    ui.scanLayer = layer;
+    focusWithoutScroll(closeButton);
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+    } catch (_error) {
+      error.textContent = "カメラを起動できませんでした。許可設定を確認してください。";
+      error.hidden = false;
+      return;
+    }
+    if (!ui.scanLayer) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+    scanStream = stream;
+    video.srcObject = stream;
+    try { await video.play(); } catch (_error) { /* ignore play errors */ }
+
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    function tick() {
+      if (!ui.scanLayer) return;
+      if (video.readyState >= 2 && video.videoWidth && video.videoHeight && ctx) {
+        const width = Math.min(video.videoWidth, 640);
+        const height = Math.round(video.videoHeight * width / video.videoWidth);
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(video, 0, 0, width, height);
+        const image = ctx.getImageData(0, 0, width, height);
+        const found = window.jsQR(image.data, width, height, { inversionAttempts: "dontInvert" });
+        if (found && handleScannedValue(found.data)) return;
+        error.textContent = "QRコードが見つかりません。カメラに合わせてください。";
+        error.hidden = false;
+      }
+      scanFrame = window.requestAnimationFrame(tick);
+    }
+    scanFrame = window.requestAnimationFrame(tick);
+  }
+
   /* ---------- toasts ---------- */
 
   function showToast(message, tone) {
@@ -3330,6 +3460,8 @@
   /* ---------- global events ---------- */
 
   let appHeightFrame = 0;
+  let lastViewportHeight = 0;
+  let scrollAfterKeyboard = false;
 
   function updateAppHeight() {
     const viewport = window.visualViewport;
@@ -3341,6 +3473,10 @@
     }
     root.style.setProperty("--vv-top", `${Math.round(viewport ? viewport.offsetTop : 0)}px`);
     root.style.setProperty("--vv-left", `${Math.round(viewport ? viewport.offsetLeft : 0)}px`);
+    if (lastViewportHeight && height < lastViewportHeight - 40) {
+      scrollAfterKeyboard = true;
+    }
+    lastViewportHeight = height;
   }
 
   function scheduleAppHeight() {
@@ -3348,6 +3484,14 @@
     appHeightFrame = window.requestAnimationFrame(function () {
       appHeightFrame = 0;
       updateAppHeight();
+      if (scrollAfterKeyboard) {
+        scrollAfterKeyboard = false;
+        window.requestAnimationFrame(function () {
+          if (ui.messages) {
+            ui.messages.scrollTop = ui.messages.scrollHeight;
+          }
+        });
+      }
     });
   }
 
@@ -3394,6 +3538,10 @@
     }
     if (ui.lightbox) {
       closeLightbox();
+      return;
+    }
+    if (ui.scanLayer) {
+      closeQrScanner();
       return;
     }
     if (ui.qrLayer) {

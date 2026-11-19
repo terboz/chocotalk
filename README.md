@@ -64,6 +64,7 @@ chatroom/
 1. 共有された QR コードを読み取るか、参加 URL を開きます。ゲスト用ホーム（`/`）でルームコードを入力して参加することもできます。
 2. 表示名を入力して参加します。表示名はルームごとに設定され、参加後もメニューから変更できます。
 3. アカウント登録やパスワードはありません。
+- スマートフォン（モバイル表示）のゲスト用ホームでは「QRコードを読み取る」ボタンからカメラで参加用QRを読み取れます。カメラ利用には HTTPS（または localhost）とカメラ許可が必要です。
 
 ## ローカル起動
 
@@ -183,4 +184,5 @@ QR コードはデプロイ後の URL から生成されるため、公開後は
 ## 外部ライブラリ
 
 - `public/vendor/qrcode.js`: qrcode-generator 1.4.4（MIT、Kazuhiko Arase）を同梱。
+- `public/vendor/jsQR.js`: jsQR 1.x（Apache-2.0、cozmo/jsQR）。カメラ映像からQRコードを読み取るために使用。
 - 開発依存: `wrangler`（`package.json` の `devDependencies`）。

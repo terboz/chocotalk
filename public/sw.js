@@ -1,7 +1,7 @@
 /* chocotalk service worker: static assets only. API and WebSocket traffic always go to the network. */
 "use strict";
 
-const CACHE_NAME = "chocotalk-static-v4";
+const CACHE_NAME = "chocotalk-static-v5";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -12,7 +12,8 @@ const PRECACHE_URLS = [
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/apple-touch-icon.png",
-  "/vendor/qrcode.js"
+  "/vendor/qrcode.js",
+  "/vendor/jsQR.js"
 ];
 const NETWORK_FIRST_ASSETS = new Set([
   "/app.js",
