@@ -249,6 +249,11 @@
     }
   }
 
+  function focusWithoutScroll(element) {
+    if (!element) return;
+    try { element.focus({ preventScroll: true }); } catch (_) { element.focus(); }
+  }
+
   function initials(name) {
     const chars = Array.from((name || "").trim());
     if (!chars.length) {
@@ -754,7 +759,7 @@
 
       if (!hostName) {
         setFormError(createError, "あなたの名前を入力してください。");
-        nameInput.focus();
+        focusWithoutScroll(nameInput);
         return;
       }
       if (Array.from(hostName).length > MAX_NAME_LENGTH) {
@@ -763,7 +768,7 @@
       }
       if (!roomName) {
         setFormError(createError, "ルーム名を入力してください。");
-        roomNameInput.focus();
+        focusWithoutScroll(roomNameInput);
         return;
       }
       if (Array.from(roomName).length > MAX_ROOM_NAME_LENGTH) {
@@ -805,7 +810,7 @@
       const code = codeInput.value.trim();
       if (!code) {
         setFormError(joinError, "ルームコードを入力してください。");
-        codeInput.focus();
+        focusWithoutScroll(codeInput);
         return;
       }
       navigate(`/r/${encodeURIComponent(code)}`);
@@ -1273,7 +1278,7 @@
       const name = nameInput.value.trim();
       if (!name) {
         setFormError(errorElement, "表示名を入力してください。");
-        nameInput.focus();
+        focusWithoutScroll(nameInput);
         return;
       }
       if (Array.from(name).length > MAX_NAME_LENGTH) {
@@ -1398,7 +1403,7 @@
       button.addEventListener("click", () => {
         hideStampPopover();
         if (sendSocketMessage({ kind: "stamp", text: stamp })) {
-          ui.input.focus();
+          focusWithoutScroll(ui.input);
         }
       });
       stampPopover.appendChild(button);
@@ -2028,6 +2033,7 @@
       updateDocumentTitle();
     }
     closeRoomNotifications();
+    setAppBadgeCount(0);
   }
 
   /* ---------- composer ---------- */
@@ -2100,7 +2106,7 @@
     resizeComposer();
     setComposerError("");
     updateComposerAvailability();
-    ui.input.focus();
+    focusWithoutScroll(ui.input);
   }
 
   function hideStampPopover() {
@@ -2265,7 +2271,7 @@
     window.setTimeout(() => {
       const button = layer.querySelector(".lightbox-close");
       if (button) {
-        button.focus();
+        focusWithoutScroll(button);
       }
     }, 0);
   }
@@ -2373,6 +2379,25 @@
 
   let serviceWorkerPromise = null;
 
+  let appBadgeCount = 0;
+
+  function setAppBadgeCount(count) {
+    appBadgeCount = Math.max(0, count);
+    const nav = navigator;
+    if (typeof nav.setAppBadge !== "function") {
+      return;
+    }
+    try {
+      if (appBadgeCount === 0 && typeof nav.clearAppBadge === "function") {
+        Promise.resolve(nav.clearAppBadge()).catch(function () {});
+      } else {
+        Promise.resolve(nav.setAppBadge(appBadgeCount)).catch(function () {});
+      }
+    } catch (_error) {
+      /* app badges are best-effort */
+    }
+  }
+
   function notificationsSupported() {
     return window.isSecureContext && "Notification" in window && "serviceWorker" in navigator;
   }
@@ -2440,10 +2465,11 @@
   }
 
   function showRoomNotification(message) {
-    if (!notificationsSupported() || Notification.permission !== "granted") {
+    if (document.visibilityState !== "hidden" || state.closed || !state.room) {
       return;
     }
-    if (document.visibilityState !== "hidden" || state.closed || !state.room) {
+    setAppBadgeCount(appBadgeCount + 1);
+    if (!notificationsSupported() || Notification.permission !== "granted") {
       return;
     }
     const title = state.room.name;
@@ -3004,7 +3030,7 @@
     ui.menuLayer = layer;
     refreshMenuMembers();
     refreshMenuNotificationLabel();
-    window.setTimeout(() => closeButton.focus(), 0);
+    window.setTimeout(() => focusWithoutScroll(closeButton), 0);
   }
 
   function closeMenu() {
@@ -3267,7 +3293,7 @@
     layer.appendChild(card);
     document.body.appendChild(layer);
     ui.qrLayer = layer;
-    window.setTimeout(() => closeButton.focus(), 0);
+    window.setTimeout(() => focusWithoutScroll(closeButton), 0);
   }
 
   function closeQrDialog() {
@@ -3303,21 +3329,35 @@
 
   /* ---------- global events ---------- */
 
+  let appHeightFrame = 0;
+
   function updateAppHeight() {
     const viewport = window.visualViewport;
     const height = viewport && viewport.height ? viewport.height : window.innerHeight;
+    const root = document.documentElement;
     if (height > 0) {
-      document.documentElement.style.setProperty("--app-height", `${Math.round(height)}px`);
+      root.style.setProperty("--app-height", `${Math.round(height)}px`);
+      root.style.setProperty("--vvh", `${Math.round(height)}px`);
     }
+    root.style.setProperty("--vv-top", `${Math.round(viewport ? viewport.offsetTop : 0)}px`);
+    root.style.setProperty("--vv-left", `${Math.round(viewport ? viewport.offsetLeft : 0)}px`);
+  }
+
+  function scheduleAppHeight() {
+    if (appHeightFrame) return;
+    appHeightFrame = window.requestAnimationFrame(function () {
+      appHeightFrame = 0;
+      updateAppHeight();
+    });
   }
 
   function bindAppHeight() {
     updateAppHeight();
-    window.addEventListener("resize", updateAppHeight);
-    window.addEventListener("orientationchange", updateAppHeight);
+    window.addEventListener("resize", scheduleAppHeight);
+    window.addEventListener("orientationchange", scheduleAppHeight);
     if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", updateAppHeight);
-      window.visualViewport.addEventListener("scroll", updateAppHeight);
+      window.visualViewport.addEventListener("resize", scheduleAppHeight);
+      window.visualViewport.addEventListener("scroll", scheduleAppHeight);
     }
   }
 

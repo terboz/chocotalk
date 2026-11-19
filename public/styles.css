@@ -7,7 +7,7 @@
   --panel-strong: #eef1f8;
   --text: #172033;
   --text-soft: #465168;
-  --muted: #75809a;
+  --muted: #5b6780;
   --line: #e1e6f0;
   --line-strong: #cdd5e5;
   --accent: #4f46e5;
@@ -127,6 +127,7 @@ svg {
   height: var(--app-height, 100vh);
   height: var(--app-height, 100dvh);
   overflow: hidden;
+  transform: translate3d(var(--vv-left, 0px), var(--vv-top, 0px), 0);
 }
 
 .app-frame {
@@ -165,6 +166,15 @@ svg {
 
 :focus-visible {
   outline: 3px solid color-mix(in srgb, var(--accent) 62%, transparent);
+  outline-offset: 2px;
+}
+
+.composer-input:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -249,7 +259,7 @@ svg {
 }
 
 .btn-small {
-  min-height: 36px;
+  min-height: 44px;
   padding: 7px 14px;
   font-size: 13px;
 }
@@ -1001,8 +1011,8 @@ svg {
 
 .menu-btn {
   flex: 0 0 auto;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border-radius: 14px;
   color: var(--text-soft);
   font-size: 19px;
@@ -1272,6 +1282,11 @@ svg {
 @keyframes rise-in {
   from { opacity: 0; transform: translate(-50%, 6px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes qr-rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------- composer ---------- */
@@ -1883,14 +1898,14 @@ svg {
   z-index: 200;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px));
 }
 
 .qr-card {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 390px;
+  max-width: min(390px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   overflow-y: auto;
@@ -1900,7 +1915,7 @@ svg {
   background: var(--panel);
   box-shadow: var(--shadow-lg);
   text-align: center;
-  animation: rise-in 0.18s ease both;
+  animation: qr-rise-in 0.18s ease both;
 }
 
 .qr-card h2 {
@@ -1929,7 +1944,9 @@ svg {
 }
 
 .qr-box svg {
+  display: block;
   width: 100%;
+  max-width: 100%;
   height: auto;
 }
 
@@ -1967,8 +1984,8 @@ svg {
   position: absolute;
   top: 10px;
   right: 10px;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   color: var(--muted);
 }
@@ -2147,7 +2164,7 @@ svg {
 
 @media (max-width: 420px) {
   .composer .icon-btn {
-    width: 36px;
+    width: 40px;
   }
 
   .send-btn {
@@ -2182,7 +2199,7 @@ svg {
 
 @media (max-width: 340px) {
   .composer-tools .icon-btn {
-    width: 32px;
+    width: 40px;
   }
 
   .send-btn {
