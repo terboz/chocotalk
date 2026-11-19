@@ -1492,6 +1492,9 @@
         ui.messages.scrollTop = ui.messages.scrollHeight;
       }
     });
+    ui.input.addEventListener("focus", function () {
+      ensureViewportWatch(3000);
+    });
     ui.sendButton = sendButton;
     ui.stampButton = stampButton;
     ui.imageButton = imageButton;
@@ -3459,49 +3462,104 @@
 
   /* ---------- global events ---------- */
 
-  let appHeightFrame = 0;
+  let watchFrame = 0;
+  let watchUntil = 0;
   let lastViewportHeight = 0;
+  let lastAppliedHeight = -1;
+  let lastAppliedTop = -1;
+  let lastAppliedLeft = -1;
   let scrollAfterKeyboard = false;
 
   function updateAppHeight() {
     const viewport = window.visualViewport;
-    const height = viewport && viewport.height ? viewport.height : window.innerHeight;
+    const rawHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
+    const rawTop = viewport ? viewport.offsetTop : 0;
+    const rawLeft = viewport ? viewport.offsetLeft : 0;
+    const height = Math.round(rawHeight * 100) / 100;
+    const top = Math.round(rawTop * 100) / 100;
+    const left = Math.round(rawLeft * 100) / 100;
     const root = document.documentElement;
-    if (height > 0) {
-      root.style.setProperty("--app-height", `${Math.round(height)}px`);
-      root.style.setProperty("--vvh", `${Math.round(height)}px`);
+
+    if (height > 0 && height !== lastAppliedHeight) {
+      root.style.setProperty("--app-height", `${height}px`);
+      root.style.setProperty("--vvh", `${height}px`);
+      lastAppliedHeight = height;
     }
-    root.style.setProperty("--vv-top", `${Math.round(viewport ? viewport.offsetTop : 0)}px`);
-    root.style.setProperty("--vv-left", `${Math.round(viewport ? viewport.offsetLeft : 0)}px`);
-    if (lastViewportHeight && height < lastViewportHeight - 40) {
+    if (top !== lastAppliedTop) {
+      root.style.setProperty("--vv-top", `${top}px`);
+      lastAppliedTop = top;
+    }
+    if (left !== lastAppliedLeft) {
+      root.style.setProperty("--vv-left", `${left}px`);
+      lastAppliedLeft = left;
+    }
+
+    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+    const keyboardOpen = layoutHeight - height > 100;
+    if (keyboardOpen && lastViewportHeight && height < lastViewportHeight) {
       scrollAfterKeyboard = true;
     }
     lastViewportHeight = height;
   }
 
-  function scheduleAppHeight() {
-    if (appHeightFrame) return;
-    appHeightFrame = window.requestAnimationFrame(function () {
-      appHeightFrame = 0;
-      updateAppHeight();
-      if (scrollAfterKeyboard) {
-        scrollAfterKeyboard = false;
-        window.requestAnimationFrame(function () {
-          if (ui.messages) {
-            ui.messages.scrollTop = ui.messages.scrollHeight;
-          }
-        });
+  function flushKeyboardScroll() {
+    if (!scrollAfterKeyboard) return;
+    scrollAfterKeyboard = false;
+    window.requestAnimationFrame(function () {
+      if (ui.messages) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
       }
     });
   }
 
+  function keyboardIsOpen() {
+    const viewport = window.visualViewport;
+    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+    const height = viewport && viewport.height ? viewport.height : window.innerHeight;
+    return layoutHeight - height > 100;
+  }
+
+  function watchTick() {
+    watchFrame = 0;
+    updateAppHeight();
+    flushKeyboardScroll();
+    if (performance.now() < watchUntil || keyboardIsOpen()) {
+      watchFrame = window.requestAnimationFrame(watchTick);
+    }
+  }
+
+  function ensureViewportWatch(duration) {
+    const span = duration || 1200;
+    const until = performance.now() + span;
+    if (until > watchUntil) {
+      watchUntil = until;
+    }
+    if (!watchFrame) {
+      watchFrame = window.requestAnimationFrame(watchTick);
+    }
+  }
+
+  function handleViewportChange() {
+    ensureViewportWatch(1200);
+  }
+
+  function handleFocusChange(event) {
+    const target = event.target;
+    if (!target) return;
+    const tag = target.tagName;
+    if (tag !== "INPUT" && tag !== "TEXTAREA") return;
+    ensureViewportWatch(event.type === "focusin" ? 3000 : 1500);
+  }
+
   function bindAppHeight() {
     updateAppHeight();
-    window.addEventListener("resize", scheduleAppHeight);
-    window.addEventListener("orientationchange", scheduleAppHeight);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("orientationchange", handleViewportChange);
+    document.addEventListener("focusin", handleFocusChange);
+    document.addEventListener("focusout", handleFocusChange);
     if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", scheduleAppHeight);
-      window.visualViewport.addEventListener("scroll", scheduleAppHeight);
+      window.visualViewport.addEventListener("resize", handleViewportChange);
+      window.visualViewport.addEventListener("scroll", handleViewportChange);
     }
   }
 
