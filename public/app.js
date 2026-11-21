@@ -4,6 +4,7 @@
   const APP_NAME = "chocotalk";
   const HOST_ID_KEY = "kc_host_id";
   const ROOMS_KEY = "kc_rooms";
+  const GUEST_ROOMS_KEY = "kc_guest_rooms";
   const MAX_IMAGE_DATA_URL_LENGTH = 240000;
   const MAX_NAME_LENGTH = 30;
   const MAX_ROOM_NAME_LENGTH = 50;
@@ -186,6 +187,57 @@
 
   function removeRoomFromHistory(code) {
     saveRoomHistory(readRoomHistory().filter((item) => item.code !== code));
+  }
+
+  function readGuestRooms() {
+    const raw = localGet(GUEST_ROOMS_KEY);
+    if (!raw) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter((entry) => (
+        entry && typeof entry.code === "string" && entry.code.trim() !== ""
+      )).map((entry) => ({
+        code: String(entry.code),
+        name: typeof entry.name === "string" && entry.name ? entry.name : String(entry.code),
+        hostName: typeof entry.hostName === "string" ? entry.hostName : "",
+        joinedAt: entry.joinedAt || 0,
+        lastVisitedAt: entry.lastVisitedAt || entry.joinedAt || 0
+      })).sort((a, b) => b.lastVisitedAt - a.lastVisitedAt);
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function saveGuestRooms(entries) {
+    localSet(GUEST_ROOMS_KEY, JSON.stringify(entries));
+  }
+
+  function rememberGuestRoom(room) {
+    if (!room || !room.code) {
+      return;
+    }
+    const code = String(room.code);
+    const now = Date.now();
+    const current = readGuestRooms();
+    const previous = current.find((item) => item.code === code);
+    const entries = current.filter((item) => item.code !== code);
+    entries.unshift({
+      code,
+      name: typeof room.name === "string" && room.name ? room.name : code,
+      hostName: typeof room.hostName === "string" ? room.hostName : "",
+      joinedAt: previous && previous.joinedAt ? previous.joinedAt : now,
+      lastVisitedAt: now
+    });
+    saveGuestRooms(entries.slice(0, 50));
+  }
+
+  function removeGuestRoom(code) {
+    saveGuestRooms(readGuestRooms().filter((item) => item.code !== code));
   }
 
   /* ---------- DOM helpers ---------- */
@@ -745,10 +797,105 @@
       roomsList
     );
 
+    let guestSection = null;
+    let guestRows = [];
+    if (!isHostHome) {
+      const guestEntries = readGuestRooms();
+      const guestRefreshButton = h("button", {
+        className: "btn btn-ghost btn-small",
+        attrs: { type: "button" },
+        text: "状態を再確認"
+      });
+      const guestList = h("div", { className: "rooms-list" });
+
+      if (!guestEntries.length) {
+        guestList.appendChild(h("div", {
+          className: "empty-state",
+          text: "まだ参加したルームはありません。上のフォームからコードで参加できます。"
+        }));
+      }
+
+      guestEntries.forEach((entry) => {
+        const status = h("span", {
+          className: "badge status-pill",
+          text: "確認中…"
+        });
+        const openButton = h("button", {
+          className: "btn btn-small",
+          attrs: { type: "button", disabled: true },
+          text: "開く"
+        });
+        const leaveButton = h("button", {
+          className: "btn btn-danger btn-small",
+          attrs: { type: "button" },
+          text: "退出"
+        });
+        const nameLabel = h("span", { className: "room-row-name", text: entry.name });
+        const row = h(
+          "div",
+          { className: "room-row", dataset: { roomCode: entry.code } },
+          h(
+            "div",
+            { className: "room-row-main" },
+            h("div", { className: "room-row-title" }, nameLabel),
+            h(
+              "div",
+              { className: "room-row-meta" },
+              h("span", { className: "room-code", text: `コード: ${entry.code}` }),
+              entry.hostName ? h("span", { text: `ホスト: ${entry.hostName}` }) : null
+            )
+          ),
+          h("div", { className: "room-row-side" }, status, openButton, leaveButton)
+        );
+
+        openButton.addEventListener("click", () => {
+          if (!openButton.disabled) {
+            navigate(`/r/${encodeURIComponent(entry.code)}`);
+          }
+        });
+        leaveButton.addEventListener("click", () => {
+          leaveGuestRoom(entry, row, guestList, guestRows);
+        });
+
+        guestList.appendChild(row);
+        guestRows.push({ entry, status, openButton, nameLabel });
+      });
+
+      guestSection = h(
+        "section",
+        { className: "rooms-section" },
+        h(
+          "div",
+          { className: "section-heading" },
+          h(
+            "div",
+            null,
+            h("h2", { text: "参加中のルーム" }),
+            h("p", { text: "このブラウザで参加したルームの一覧です。" })
+          ),
+          guestRefreshButton
+        ),
+        guestList
+      );
+
+      guestRefreshButton.addEventListener("click", () => {
+        guestRefreshButton.disabled = true;
+        guestRefreshButton.textContent = "確認中…";
+        refreshHomeRoomStatuses(token, guestRows).finally(() => {
+          if (token === routeToken) {
+            guestRefreshButton.disabled = false;
+            guestRefreshButton.textContent = "状態を再確認";
+          }
+        });
+      });
+    }
+
     inner.appendChild(hero);
     inner.appendChild(content);
     if (isHostHome) {
       inner.appendChild(roomsSection);
+    } else if (guestSection) {
+      inner.appendChild(guestSection);
     }
     inner.appendChild(h(
       "footer",
@@ -838,6 +985,8 @@
 
     if (isHostHome) {
       refreshHomeRoomStatuses(token, rows);
+    } else {
+      refreshHomeRoomStatuses(token, guestRows);
     }
   }
 
@@ -934,6 +1083,49 @@
       roomsList.appendChild(h("div", {
         className: "empty-state",
         text: "まだ作成したルームはありません。上のフォームから最初のルームを作ってみましょう。"
+      }));
+    }
+  }
+
+  function leaveGuestRoom(entry, row, guestList, guestRows) {
+    const confirmed = window.confirm(`「${entry.name}」から退出しますか？`);
+    if (!confirmed) {
+      return;
+    }
+    removeGuestRoom(entry.code);
+    if (Array.isArray(guestRows)) {
+      const index = guestRows.findIndex((item) => item.entry && item.entry.code === entry.code);
+      if (index !== -1) {
+        guestRows.splice(index, 1);
+      }
+    }
+    try {
+      window.sessionStorage.removeItem(`kc_cid_${entry.code}`);
+    } catch (_error) {
+      /* sessionStorage unavailable */
+    }
+    if (row.isConnected) {
+      row.remove();
+    }
+    updateGuestRoomsEmptyState(guestList);
+    showToast("ルームから退出しました。", "success");
+  }
+
+  function updateGuestRoomsEmptyState(guestList) {
+    if (!guestList) {
+      return;
+    }
+    if (guestList.querySelector(".room-row")) {
+      const empty = guestList.querySelector(".empty-state");
+      if (empty) {
+        empty.remove();
+      }
+      return;
+    }
+    if (!guestList.querySelector(".empty-state")) {
+      guestList.appendChild(h("div", {
+        className: "empty-state",
+        text: "まだ参加したルームはありません。上のフォームからコードで参加できます。"
       }));
     }
   }
@@ -2730,6 +2922,14 @@
         if (data.self.role === "host") {
           state.isHost = true;
         }
+      }
+      if (
+        state.room &&
+        state.room.code &&
+        !state.room.closed &&
+        !(data.self && data.self.role === "host")
+      ) {
+        rememberGuestRoom(state.room);
       }
       if (Array.isArray(data.messages)) {
         mergeMessages(data.messages);
