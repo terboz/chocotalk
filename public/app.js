@@ -307,6 +307,94 @@
     try { element.focus({ preventScroll: true }); } catch (_) { element.focus(); }
   }
 
+  /* ---------- iOS keyboard: focus proxy ---------- */
+
+  const IS_IOS =
+    /iP(hone|od|ad)/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const KEYBOARD_PROXY_DISABLED = /(?:^|[?&])kbproxy=0(?:&|$)/.test(window.location.search);
+
+  let focusProxy = null;
+  let handoffTimer = 0;
+
+  function getFocusProxy() {
+    if (focusProxy) {
+      return focusProxy;
+    }
+    const proxy = document.createElement("input");
+    proxy.type = "text";
+    proxy.className = "focus-proxy";
+    proxy.setAttribute("aria-hidden", "true");
+    proxy.setAttribute("tabindex", "-1");
+    proxy.setAttribute("autocomplete", "off");
+    proxy.setAttribute("enterkeyhint", "send");
+    document.body.appendChild(proxy);
+    focusProxy = proxy;
+    return proxy;
+  }
+
+  function handoffFocus(target) {
+    window.clearTimeout(handoffTimer);
+    const proxy = getFocusProxy();
+    const viewport = window.visualViewport;
+    const baseHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
+    const started = performance.now();
+
+    function finish() {
+      updateAppHeight();
+      focusWithoutScroll(target);
+      if (window.scrollY) {
+        window.scrollTo(0, 0);
+      }
+      if (ui.messages) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      }
+      ensureViewportWatch(1500);
+    }
+
+    function poll() {
+      const current = window.visualViewport;
+      const height = current && current.height ? current.height : window.innerHeight;
+      if (baseHeight - height > 100 || performance.now() - started > 600) {
+        finish();
+      } else {
+        handoffTimer = window.setTimeout(poll, 16);
+      }
+    }
+
+    focusWithoutScroll(proxy);
+    ensureViewportWatch(3000);
+    poll();
+  }
+
+  function bindKeyboardProxy(textarea) {
+    if (!IS_IOS || KEYBOARD_PROXY_DISABLED || !textarea) {
+      return;
+    }
+    let startX = 0;
+    let startY = 0;
+
+    textarea.addEventListener("touchstart", (event) => {
+      const touch = event.changedTouches && event.changedTouches[0];
+      if (touch) {
+        startX = touch.clientX;
+        startY = touch.clientY;
+      }
+    }, { passive: true });
+
+    textarea.addEventListener("touchend", (event) => {
+      if (document.activeElement === textarea || textarea.disabled) {
+        return;
+      }
+      const touch = event.changedTouches && event.changedTouches[0];
+      if (touch && (Math.abs(touch.clientX - startX) > 10 || Math.abs(touch.clientY - startY) > 10)) {
+        return;
+      }
+      event.preventDefault();
+      handoffFocus(textarea);
+    }, { passive: false });
+  }
+
   function initials(name) {
     const chars = Array.from((name || "").trim());
     if (!chars.length) {
@@ -1679,6 +1767,7 @@
     ui.messages = messages;
     ui.newButton = newButton;
     ui.input = textarea;
+    bindKeyboardProxy(textarea);
     ui.input.addEventListener("focus", function () {
       if (ui.messages) {
         ui.messages.scrollTop = ui.messages.scrollHeight;

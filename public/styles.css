@@ -2233,3 +2233,21 @@ a:focus-visible {
   }
 }
 
+/* iOS keyboard focus proxy: sits at the very top so Safari won't shift the viewport */
+.focus-proxy {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+  pointer-events: none;
+  caret-color: transparent;
+  z-index: -1;
+}
+
