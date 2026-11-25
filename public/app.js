@@ -3816,6 +3816,92 @@
     ensureViewportWatch(800);
   }
 
+  /* ---------- keyboard debug overlay (only with ?kbdebug=1) ---------- */
+
+  const KB_DEBUG = /(?:^|[?&])kbdebug=1(?:&|$)/.test(window.location.search);
+
+  function bindKeyboardDebug() {
+    if (!KB_DEBUG) return;
+    const panel = document.createElement("pre");
+    panel.className = "kb-debug";
+    panel.textContent = "kbdebug: tap the message box";
+    document.body.appendChild(panel);
+
+    const lines = [];
+    let t0 = performance.now();
+    let until = 0;
+    let frame = 0;
+    let last = "";
+
+    function push(text) {
+      lines.push(Math.round(performance.now() - t0) + "ms " + text);
+      if (lines.length > 80) lines.shift();
+      panel.textContent = lines.join("\n");
+    }
+
+    function sample() {
+      const vv = window.visualViewport;
+      const app = document.querySelector(".app-root");
+      const composer = document.querySelector(".composer");
+      const rootStyle = getComputedStyle(document.documentElement);
+      const appRect = app ? app.getBoundingClientRect() : null;
+      const cmpRect = composer ? composer.getBoundingClientRect() : null;
+      const text = [
+        "vvH=" + (vv ? Math.round(vv.height) : "-"),
+        "vvT=" + (vv ? Math.round(vv.offsetTop) : "-"),
+        "sy=" + Math.round(window.scrollY),
+        "var=" + rootStyle.getPropertyValue("--app-height").trim(),
+        "appH=" + (appRect ? Math.round(appRect.height) : "-"),
+        "appT=" + (appRect ? Math.round(appRect.top) : "-"),
+        "cmpB=" + (cmpRect ? Math.round(cmpRect.bottom) : "-"),
+        app && app.classList.contains("is-kb-closing") ? "CLOSING" : ""
+      ].join(" ");
+      if (text !== last) {
+        push(text);
+        last = text;
+      }
+    }
+
+    function tick() {
+      sample();
+      frame = performance.now() < until ? window.requestAnimationFrame(tick) : 0;
+    }
+
+    function mark(label, reset) {
+      if (reset) {
+        t0 = performance.now();
+        lines.length = 0;
+        last = "";
+      }
+      until = performance.now() + 1500;
+      push("[" + label + "]");
+      if (!frame) {
+        frame = window.requestAnimationFrame(tick);
+      }
+    }
+
+    function nameOf(el) {
+      if (!el || !el.tagName) return "null";
+      return el.tagName.toLowerCase() + (el.className ? "." + String(el.className).split(" ")[0] : "");
+    }
+
+    document.addEventListener("touchend", (event) => {
+      const target = event.target;
+      if (target && target.classList && target.classList.contains("composer-input")) {
+        mark("tap", true);
+      }
+    }, { capture: true, passive: true });
+    document.addEventListener("focusin", (event) => mark("focusin " + nameOf(event.target)), true);
+    document.addEventListener("focusout", (event) => {
+      mark("focusout " + nameOf(event.target) + " -> " + nameOf(event.relatedTarget));
+    }, true);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", () => mark("vv resize"));
+      window.visualViewport.addEventListener("scroll", () => mark("vv scroll"));
+    }
+    window.addEventListener("scroll", () => mark("win scroll"), { passive: true });
+  }
+
   /* ---------- global events ---------- */
 
   let watchFrame = 0;
@@ -3929,6 +4015,7 @@
   }
 
   function bindAppHeight() {
+    bindKeyboardDebug();
     updateAppHeight();
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("orientationchange", handleViewportChange);
