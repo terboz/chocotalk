@@ -316,6 +316,7 @@
 
   let focusProxy = null;
   let handoffTimer = 0;
+  let handoffActive = false; // true while focus moves proxy -> textarea
 
   function getFocusProxy() {
     if (focusProxy) {
@@ -335,6 +336,7 @@
 
   function handoffFocus(target) {
     window.clearTimeout(handoffTimer);
+    handoffActive = true;
     if (kbClosing) {
       endKeyboardCloseAnimation(true);
     }
@@ -346,6 +348,7 @@
     function finish() {
       updateAppHeight();
       focusWithoutScroll(target);
+      handoffActive = false;
       if (window.scrollY) {
         window.scrollTo(0, 0);
       }
@@ -3911,10 +3914,16 @@
       return;
     }
 
-    // focusout: animate only when focus leaves every text field
-    // (proxy -> textarea handoff has relatedTarget = textarea, so it is skipped)
-    if (IS_IOS && !KEYBOARD_PROXY_DISABLED && !isTextField(event.relatedTarget) && keyboardIsOpen()) {
-      startKeyboardCloseAnimation();
+    // focusout: start the close animation only when focus really left every text field.
+    // iOS Safari can report relatedTarget = null even for the proxy -> textarea handoff,
+    // so decide after the focus change has settled instead of trusting relatedTarget.
+    if (IS_IOS && !KEYBOARD_PROXY_DISABLED && !handoffActive) {
+      window.setTimeout(() => {
+        if (handoffActive || isTextField(document.activeElement) || !keyboardIsOpen()) {
+          return;
+        }
+        startKeyboardCloseAnimation();
+      }, 0);
     }
     ensureViewportWatch(1500);
   }
