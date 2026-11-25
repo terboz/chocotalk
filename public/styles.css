@@ -2269,22 +2269,3 @@ a:focus-visible {
 .menu-panel {
   overscroll-behavior: contain;
 }
-
-/* keyboard debug overlay (?kbdebug=1 only) */
-.kb-debug {
-  position: fixed;
-  top: calc(64px + env(safe-area-inset-top));
-  left: 4px;
-  right: 4px;
-  z-index: 9999;
-  max-height: 45vh;
-  margin: 0;
-  padding: 6px;
-  overflow: auto;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.78);
-  color: #7CFC00;
-  font: 10px/1.35 ui-monospace, Menlo, monospace;
-  white-space: pre-wrap;
-  word-break: break-all;
-}

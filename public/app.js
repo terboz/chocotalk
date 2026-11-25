@@ -367,9 +367,6 @@
 
     // Safari reports the keyboard height in one step; updateAppHeight() animates it.
     focusWithoutScroll(proxy);
-    if (KB_PREDICT) {
-      startKeyboardOpenPrediction(); // ?kbpredict=1: start moving on tap
-    }
     ensureViewportWatch(3000);
     poll();
   }
@@ -3777,13 +3774,6 @@
   // on focusout and stale "keyboard open" heights are ignored for a while.
   const KB_CLOSE_HOLD_MS = 900;
   let kbCloseHoldUntil = 0;
-  // Opening (?kbpredict=1): Safari reports the height ~110ms after focus.
-  // With a remembered keyboard height the animation starts on tap instead,
-  // and the real value corrects it when it arrives.
-  const KB_PREDICT = /(?:^|[?&])kbpredict=1(?:&|$)/.test(window.location.search);
-  const KB_OPEN_HOLD_MS = 600;
-  let kbOpenHoldUntil = 0;
-  const kbHeightCache = {};
 
   function isTextField(el) {
     return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
@@ -3819,51 +3809,10 @@
     }, KB_ANIM_MS + 60);
   }
 
-  function kbCacheKey() {
-    return window.innerWidth > window.innerHeight ? "chocotalk:kbH:landscape" : "chocotalk:kbH:portrait";
-  }
-
-  function readKeyboardHeight() {
-    const key = kbCacheKey();
-    if (!(key in kbHeightCache)) {
-      let value = 0;
-      try { value = Number(window.localStorage.getItem(key)) || 0; } catch (_) {}
-      kbHeightCache[key] = value;
-    }
-    const value = kbHeightCache[key];
-    return value > 150 ? value : 0;
-  }
-
-  function saveKeyboardHeight(value) {
-    const rounded = Math.round(value);
-    if (!(rounded > 150)) return;
-    const key = kbCacheKey();
-    if (kbHeightCache[key] === rounded) return;
-    kbHeightCache[key] = rounded;
-    try { window.localStorage.setItem(key, String(rounded)); } catch (_) {}
-  }
-
-  function startKeyboardOpenPrediction() {
-    const root = document.documentElement;
-    const fullHeight = root.clientHeight || window.innerHeight;
-    const keyboard = readKeyboardHeight();
-    if (!keyboard || !(fullHeight > 0)) return;          // first time: wait for Safari
-    if (fullHeight - lastAppliedHeight > KB_JUMP_PX) return; // already open
-    const predicted = fullHeight - keyboard;
-    if (!(predicted > 100)) return;
-    kbCloseHoldUntil = 0;
-    startKeyboardHeightAnimation();
-    root.style.setProperty("--app-height", `${predicted}px`);
-    root.style.setProperty("--vvh", `${predicted}px`);
-    lastAppliedHeight = predicted;
-    kbOpenHoldUntil = performance.now() + KB_OPEN_HOLD_MS;
-  }
-
   function startKeyboardCloseAnimation() {
     const root = document.documentElement;
     const fullHeight = root.clientHeight || window.innerHeight;
     if (!(fullHeight > 0) || fullHeight - lastAppliedHeight <= KB_JUMP_PX) return;
-    kbOpenHoldUntil = 0;
     startKeyboardHeightAnimation();
     root.style.setProperty("--app-height", `${fullHeight}px`);
     root.style.setProperty("--vvh", `${fullHeight}px`);
@@ -3927,95 +3876,6 @@
     window.addEventListener("scroll", resetPageScroll, { passive: true });
   }
 
-  /* ---------- keyboard debug overlay (only with ?kbdebug=1) ---------- */
-
-  const KB_DEBUG = /(?:^|[?&])kbdebug=1(?:&|$)/.test(window.location.search);
-
-  function bindKeyboardDebug() {
-    if (!KB_DEBUG) return;
-    const panel = document.createElement("pre");
-    panel.className = "kb-debug";
-    panel.textContent = "kbdebug: tap the message box";
-    document.body.appendChild(panel);
-
-    const lines = [];
-    let t0 = performance.now();
-    let until = 0;
-    let frame = 0;
-    let last = "";
-
-    function push(text) {
-      lines.push(Math.round(performance.now() - t0) + "ms " + text);
-      if (lines.length > 80) lines.shift();
-      panel.textContent = lines.join("\n");
-    }
-
-    function sample() {
-      const vv = window.visualViewport;
-      const app = document.querySelector(".app-root");
-      const composer = document.querySelector(".composer");
-      const rootStyle = getComputedStyle(document.documentElement);
-      const appRect = app ? app.getBoundingClientRect() : null;
-      const cmpRect = composer ? composer.getBoundingClientRect() : null;
-      const text = [
-        "vvH=" + (vv ? Math.round(vv.height) : "-"),
-        "vvT=" + (vv ? Math.round(vv.offsetTop) : "-"),
-        "sy=" + Math.round(window.scrollY),
-        "var=" + rootStyle.getPropertyValue("--app-height").trim(),
-        "top=" + rootStyle.getPropertyValue("--vv-top").trim(),
-        "appH=" + (appRect ? Math.round(appRect.height) : "-"),
-        "appT=" + (appRect ? Math.round(appRect.top) : "-"),
-        "cmpB=" + (cmpRect ? Math.round(cmpRect.bottom) : "-"),
-        app && app.classList.contains("is-kb-anim") ? "ANIM" : "",
-        kbCloseHoldUntil ? "HOLD" : "",
-        kbOpenHoldUntil ? "PRED" : ""
-      ].join(" ");
-      if (text !== last) {
-        push(text);
-        last = text;
-      }
-    }
-
-    function tick() {
-      sample();
-      frame = performance.now() < until ? window.requestAnimationFrame(tick) : 0;
-    }
-
-    function mark(label, reset) {
-      if (reset) {
-        t0 = performance.now();
-        lines.length = 0;
-        last = "";
-      }
-      until = performance.now() + 1500;
-      push("[" + label + "]");
-      if (!frame) {
-        frame = window.requestAnimationFrame(tick);
-      }
-    }
-
-    function nameOf(el) {
-      if (!el || !el.tagName) return "null";
-      return el.tagName.toLowerCase() + (el.className ? "." + String(el.className).split(" ")[0] : "");
-    }
-
-    document.addEventListener("touchend", (event) => {
-      const target = event.target;
-      if (target && target.classList && target.classList.contains("composer-input")) {
-        mark("tap", true);
-      }
-    }, { capture: true, passive: true });
-    document.addEventListener("focusin", (event) => mark("focusin " + nameOf(event.target)), true);
-    document.addEventListener("focusout", (event) => {
-      mark("focusout " + nameOf(event.target) + " -> " + nameOf(event.relatedTarget));
-    }, true);
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", () => mark("vv resize"));
-      window.visualViewport.addEventListener("scroll", () => mark("vv scroll"));
-    }
-    window.addEventListener("scroll", () => mark("win scroll"), { passive: true });
-  }
-
   /* ---------- global events ---------- */
 
   let watchFrame = 0;
@@ -4036,25 +3896,6 @@
     const left = Math.round(rawLeft * 100) / 100;
     const root = document.documentElement;
     const layoutNow = root.clientHeight || window.innerHeight;
-
-    const realHeight = height;
-
-    if (kbOpenHoldUntil) {
-      const staleClosed = layoutNow - height <= KB_JUMP_PX;
-      if (
-        performance.now() < kbOpenHoldUntil &&
-        staleClosed &&
-        isTextField(document.activeElement)
-      ) {
-        height = lastAppliedHeight; // keep the predicted open animation
-      } else {
-        // real keyboard height arrived: retarget the running animation smoothly
-        if (!staleClosed && height > 0 && Math.abs(height - lastAppliedHeight) > 1) {
-          startKeyboardHeightAnimation();
-        }
-        kbOpenHoldUntil = 0;
-      }
-    }
 
     if (kbCloseHoldUntil) {
       const staleOpen = layoutNow - height > KB_JUMP_PX;
@@ -4093,11 +3934,6 @@
       lastAppliedLeft = left;
     }
     lastLayoutHeight = layoutNow;
-
-    // remember the real keyboard height for the next prediction
-    if (!kbOpenHoldUntil && !kbCloseHoldUntil && layoutNow - realHeight > 150) {
-      saveKeyboardHeight(layoutNow - realHeight);
-    }
 
     const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
     const keyboardOpen = layoutHeight - height > 100;
@@ -4171,7 +4007,6 @@
   }
 
   function bindAppHeight() {
-    bindKeyboardDebug();
     bindScrollGuard();
     updateAppHeight();
     window.addEventListener("resize", handleViewportChange);
