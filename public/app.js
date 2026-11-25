@@ -3769,6 +3769,11 @@
   let kbAnimTimer = 0;
   let kbPinFrame = 0;
   let lastLayoutHeight = 0;
+  // Closing: Safari reports the new height only ~0.5s after focus leaves
+  // (measured: focusout 6873ms -> vv resize 7354ms), so the close is started
+  // on focusout and stale "keyboard open" heights are ignored for a while.
+  const KB_CLOSE_HOLD_MS = 900;
+  let kbCloseHoldUntil = 0;
 
   function isTextField(el) {
     return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
@@ -3802,6 +3807,18 @@
         ui.messages.scrollTop = ui.messages.scrollHeight;
       }
     }, KB_ANIM_MS + 60);
+  }
+
+  function startKeyboardCloseAnimation() {
+    const root = document.documentElement;
+    const fullHeight = root.clientHeight || window.innerHeight;
+    if (!(fullHeight > 0) || fullHeight - lastAppliedHeight <= KB_JUMP_PX) return;
+    startKeyboardHeightAnimation();
+    root.style.setProperty("--app-height", `${fullHeight}px`);
+    root.style.setProperty("--vvh", `${fullHeight}px`);
+    lastAppliedHeight = fullHeight;
+    kbCloseHoldUntil = performance.now() + KB_CLOSE_HOLD_MS;
+    ensureViewportWatch(KB_CLOSE_HOLD_MS + 600);
   }
 
   /* ---------- keyboard debug overlay (only with ?kbdebug=1) ---------- */
@@ -3843,7 +3860,8 @@
         "appH=" + (appRect ? Math.round(appRect.height) : "-"),
         "appT=" + (appRect ? Math.round(appRect.top) : "-"),
         "cmpB=" + (cmpRect ? Math.round(cmpRect.bottom) : "-"),
-        app && app.classList.contains("is-kb-anim") ? "ANIM" : ""
+        app && app.classList.contains("is-kb-anim") ? "ANIM" : "",
+        kbCloseHoldUntil ? "HOLD" : ""
       ].join(" ");
       if (text !== last) {
         push(text);
@@ -3906,11 +3924,24 @@
     const rawHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
     const rawTop = viewport ? viewport.offsetTop : 0;
     const rawLeft = viewport ? viewport.offsetLeft : 0;
-    const height = Math.round(rawHeight * 100) / 100;
+    let height = Math.round(rawHeight * 100) / 100;
     const top = Math.round(rawTop * 100) / 100;
     const left = Math.round(rawLeft * 100) / 100;
     const root = document.documentElement;
     const layoutNow = root.clientHeight || window.innerHeight;
+
+    if (kbCloseHoldUntil) {
+      const staleOpen = layoutNow - height > KB_JUMP_PX;
+      if (
+        performance.now() < kbCloseHoldUntil &&
+        staleOpen &&
+        !isTextField(document.activeElement)
+      ) {
+        height = lastAppliedHeight; // keep the already-started close animation
+      } else {
+        kbCloseHoldUntil = 0; // real height arrived, timed out, or refocused
+      }
+    }
 
     if (height > 0 && height !== lastAppliedHeight) {
       // keyboard open/close: same layout height, visual height jumps a lot
@@ -3988,7 +4019,23 @@
 
   function handleFocusChange(event) {
     if (!isTextField(event.target)) return;
-    ensureViewportWatch(event.type === "focusin" ? 3000 : 1500);
+
+    if (event.type === "focusin") {
+      ensureViewportWatch(3000);
+      return;
+    }
+
+    // focusout: start closing now, unless focus moves proxy -> textarea
+    // or to another text field (iOS may report relatedTarget = null, so check afterwards)
+    if (IS_IOS && !KEYBOARD_PROXY_DISABLED && !handoffActive) {
+      window.setTimeout(() => {
+        if (handoffActive || isTextField(document.activeElement) || !keyboardIsOpen()) {
+          return;
+        }
+        startKeyboardCloseAnimation();
+      }, 0);
+    }
+    ensureViewportWatch(1500);
   }
 
   function bindAppHeight() {
