@@ -2263,6 +2263,13 @@ a:focus-visible {
   backdrop-filter: none;
 }
 
+/* keyboard open: don't let inner scrolling chain to the page */
+.composer-input,
+.stamp-popover,
+.menu-panel {
+  overscroll-behavior: contain;
+}
+
 /* keyboard debug overlay (?kbdebug=1 only) */
 .kb-debug {
   position: fixed;

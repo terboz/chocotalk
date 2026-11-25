@@ -3872,6 +3872,61 @@
     ensureViewportWatch(KB_CLOSE_HOLD_MS + 600);
   }
 
+  /* ---------- iOS keyboard: keep the page itself from scrolling ---------- */
+  // While the keyboard is open the layout viewport is taller than the visible area,
+  // so a drag on a non-scrollable part (composer, header) pans the whole page and the
+  // composer leaves the keyboard. Block such drags and pull the page back to 0.
+  // Disable with ?kbguard=0 for comparison.
+
+  const KB_GUARD = IS_IOS && !KEYBOARD_PROXY_DISABLED &&
+    !/(?:^|[?&])kbguard=0(?:&|$)/.test(window.location.search);
+  let guardStartY = 0;
+
+  function canScrollInside(start, dy) {
+    let el = start;
+    while (el && el !== document.body && el !== document.documentElement) {
+      if (el.nodeType === 1) {
+        const style = getComputedStyle(el);
+        const scrollable = /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 1;
+        if (scrollable) {
+          if (dy > 0 && el.scrollTop > 0) return true;                                   // finger down: scroll up
+          if (dy < 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true; // finger up: scroll down
+          if (dy === 0) return true;
+        }
+      }
+      el = el.parentNode;
+    }
+    return false;
+  }
+
+  function handleGuardTouchStart(event) {
+    const touch = event.touches && event.touches[0];
+    if (touch) guardStartY = touch.clientY;
+  }
+
+  function handleGuardTouchMove(event) {
+    if (!event.cancelable || !event.touches || event.touches.length !== 1) return; // keep pinch zoom
+    if (!keyboardIsOpen()) return;
+    const dy = event.touches[0].clientY - guardStartY;
+    if (!canScrollInside(event.target, dy)) {
+      event.preventDefault();
+    }
+  }
+
+  function resetPageScroll() {
+    if (!KB_GUARD || !keyboardIsOpen()) return;
+    if (window.scrollY !== 0 || window.scrollX !== 0) {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  function bindScrollGuard() {
+    if (!KB_GUARD) return;
+    document.addEventListener("touchstart", handleGuardTouchStart, { passive: true });
+    document.addEventListener("touchmove", handleGuardTouchMove, { passive: false });
+    window.addEventListener("scroll", resetPageScroll, { passive: true });
+  }
+
   /* ---------- keyboard debug overlay (only with ?kbdebug=1) ---------- */
 
   const KB_DEBUG = /(?:^|[?&])kbdebug=1(?:&|$)/.test(window.location.search);
@@ -4090,6 +4145,7 @@
   }
 
   function handleViewportChange() {
+    resetPageScroll();
     ensureViewportWatch(1200);
   }
 
@@ -4116,6 +4172,7 @@
 
   function bindAppHeight() {
     bindKeyboardDebug();
+    bindScrollGuard();
     updateAppHeight();
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("orientationchange", handleViewportChange);
