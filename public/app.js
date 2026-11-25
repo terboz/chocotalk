@@ -340,17 +340,16 @@
     }
     const proxy = getFocusProxy();
     const viewport = window.visualViewport;
-    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
     const baseHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
     const started = performance.now();
-    const cachedKeyboard = readKeyboardHeight();
 
     function finish() {
+      updateAppHeight();
       focusWithoutScroll(target);
       if (window.scrollY) {
         window.scrollTo(0, 0);
       }
-      if (!kbOpening && ui.messages) {
+      if (ui.messages) {
         ui.messages.scrollTop = ui.messages.scrollHeight;
       }
       ensureViewportWatch(1500);
@@ -359,25 +358,17 @@
     function poll() {
       const current = window.visualViewport;
       const height = current && current.height ? current.height : window.innerHeight;
-      const opened = baseHeight - height > 100;
-      if (opened || performance.now() - started > 600) {
-        // first open (no cached height): animate once the real height is known
-        if (opened && !kbOpening && !cachedKeyboard) {
-          startKeyboardOpenAnimation(height);
-        }
+      if (baseHeight - height > 100 || performance.now() - started > 600) {
         finish();
       } else {
         handoffTimer = window.setTimeout(poll, 16);
       }
     }
 
+    // Opening: Safari updates visualViewport every frame while the keyboard slides up,
+    // and the per-frame watcher (watchTick) follows it. No predicted animation here.
     focusWithoutScroll(proxy);
-    if (cachedKeyboard) {
-      // known keyboard height: start shrinking together with the keyboard
-      startKeyboardOpenAnimation(fullHeight - cachedKeyboard);
-    } else {
-      ensureViewportWatch(3000);
-    }
+    ensureViewportWatch(3000);
     poll();
   }
 
@@ -3763,42 +3754,17 @@
     }, 3200);
   }
 
-  /* ---------- iOS keyboard: smooth open / close ---------- */
+  /* ---------- iOS keyboard: smooth close ---------- */
+  // Safari does not update visualViewport while the keyboard slides down,
+  // so the app height is animated with CSS from the moment focus leaves.
 
-  const KB_OPEN_MS = 280;
   const KB_CLOSE_MS = 260;
-  let kbOpening = false;
-  let kbOpenTimer = 0;
   let kbClosing = false;
   let kbCloseTimer = 0;
   let kbCloseStarted = 0;
-  let kbPinFrame = 0;
 
   function isTextField(el) {
     return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
-  }
-
-  function kbCacheKey() {
-    return window.innerWidth > window.innerHeight ? "chocotalk:kbH:landscape" : "chocotalk:kbH:portrait";
-  }
-
-  function readKeyboardHeight() {
-    try {
-      const value = Number(window.localStorage.getItem(kbCacheKey()));
-      return value > 150 ? value : 0;
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  function saveKeyboardHeight() {
-    const viewport = window.visualViewport;
-    if (!viewport) return;
-    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
-    const keyboard = Math.round(fullHeight - viewport.height);
-    if (keyboard > 150) {
-      try { window.localStorage.setItem(kbCacheKey(), String(keyboard)); } catch (_) {}
-    }
   }
 
   function setAppBox(height) {
@@ -3810,71 +3776,12 @@
     lastAppliedHeight = height;
   }
 
-  // keep the message list pinned to the bottom while its height animates
-  function pinMessagesDuring(ms) {
-    if (!ui.messages || !isNearBottom(160)) return;
-    const until = performance.now() + ms;
-    window.cancelAnimationFrame(kbPinFrame);
-    (function tick() {
-      if (ui.messages) {
-        ui.messages.scrollTop = ui.messages.scrollHeight;
-      }
-      if (performance.now() < until) {
-        kbPinFrame = window.requestAnimationFrame(tick);
-      }
-    })();
-  }
-
-  function animateAppHeightTo(height, className, ms) {
-    const app = document.querySelector(".app-root");
-    if (!app || !(height > 0)) return;
-    app.classList.add(className);
-    setAppBox(height);
-    pinMessagesDuring(ms + 120);
-  }
-
-  function startKeyboardOpenAnimation(height) {
-    kbOpening = true;
-    window.clearTimeout(kbOpenTimer);
-    animateAppHeightTo(height, "is-kb-opening", KB_OPEN_MS);
-    kbOpenTimer = window.setTimeout(endKeyboardOpenAnimation, KB_OPEN_MS + 60);
-  }
-
-  function endKeyboardOpenAnimation() {
-    window.clearTimeout(kbOpenTimer);
-    if (!kbOpening) return;
-    kbOpening = false;
-
-    // correct a mismatch (predictive bar, keyboard switch) with the same transition
-    const viewport = window.visualViewport;
-    const actual = viewport ? Math.round(viewport.height * 100) / 100 : 0;
-    if (keyboardIsOpen()) {
-      if (actual > 0 && Math.abs(actual - lastAppliedHeight) > 1) {
-        animateAppHeightTo(actual, "is-kb-opening", KB_OPEN_MS);
-      }
-      saveKeyboardHeight();
-    }
-
-    window.setTimeout(() => {
-      const app = document.querySelector(".app-root");
-      if (app && !kbOpening) {
-        app.classList.remove("is-kb-opening");
-      }
-      ensureViewportWatch(800);
-    }, KB_OPEN_MS);
-  }
-
   function startKeyboardCloseAnimation() {
     const app = document.querySelector(".app-root");
     if (!app) return;
     const fullHeight = document.documentElement.clientHeight || window.innerHeight;
     if (fullHeight - lastAppliedHeight < 80) return;
 
-    if (kbOpening) {
-      kbOpening = false;
-      window.clearTimeout(kbOpenTimer);
-      app.classList.remove("is-kb-opening");
-    }
     kbClosing = true;
     kbCloseStarted = performance.now();
     window.clearTimeout(kbCloseTimer);
@@ -3917,7 +3824,7 @@
   let scrollAfterKeyboard = false;
 
   function updateAppHeight() {
-    if (kbOpening || kbClosing) {
+    if (kbClosing) {
       return;
     }
     const viewport = window.visualViewport;
