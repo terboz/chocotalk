@@ -335,18 +335,22 @@
 
   function handoffFocus(target) {
     window.clearTimeout(handoffTimer);
+    if (kbClosing) {
+      endKeyboardCloseAnimation(true);
+    }
     const proxy = getFocusProxy();
     const viewport = window.visualViewport;
+    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
     const baseHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
     const started = performance.now();
+    const cachedKeyboard = readKeyboardHeight();
 
     function finish() {
-      updateAppHeight();
       focusWithoutScroll(target);
       if (window.scrollY) {
         window.scrollTo(0, 0);
       }
-      if (ui.messages) {
+      if (!kbOpening && ui.messages) {
         ui.messages.scrollTop = ui.messages.scrollHeight;
       }
       ensureViewportWatch(1500);
@@ -355,7 +359,12 @@
     function poll() {
       const current = window.visualViewport;
       const height = current && current.height ? current.height : window.innerHeight;
-      if (baseHeight - height > 100 || performance.now() - started > 600) {
+      const opened = baseHeight - height > 100;
+      if (opened || performance.now() - started > 600) {
+        // first open (no cached height): animate once the real height is known
+        if (opened && !kbOpening && !cachedKeyboard) {
+          startKeyboardOpenAnimation(height);
+        }
         finish();
       } else {
         handoffTimer = window.setTimeout(poll, 16);
@@ -363,7 +372,12 @@
     }
 
     focusWithoutScroll(proxy);
-    ensureViewportWatch(3000);
+    if (cachedKeyboard) {
+      // known keyboard height: start shrinking together with the keyboard
+      startKeyboardOpenAnimation(fullHeight - cachedKeyboard);
+    } else {
+      ensureViewportWatch(3000);
+    }
     poll();
   }
 
@@ -3749,6 +3763,149 @@
     }, 3200);
   }
 
+  /* ---------- iOS keyboard: smooth open / close ---------- */
+
+  const KB_OPEN_MS = 280;
+  const KB_CLOSE_MS = 260;
+  let kbOpening = false;
+  let kbOpenTimer = 0;
+  let kbClosing = false;
+  let kbCloseTimer = 0;
+  let kbCloseStarted = 0;
+  let kbPinFrame = 0;
+
+  function isTextField(el) {
+    return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
+  }
+
+  function kbCacheKey() {
+    return window.innerWidth > window.innerHeight ? "chocotalk:kbH:landscape" : "chocotalk:kbH:portrait";
+  }
+
+  function readKeyboardHeight() {
+    try {
+      const value = Number(window.localStorage.getItem(kbCacheKey()));
+      return value > 150 ? value : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function saveKeyboardHeight() {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
+    const keyboard = Math.round(fullHeight - viewport.height);
+    if (keyboard > 150) {
+      try { window.localStorage.setItem(kbCacheKey(), String(keyboard)); } catch (_) {}
+    }
+  }
+
+  function setAppBox(height) {
+    const root = document.documentElement;
+    root.style.setProperty("--vv-top", "0px");
+    root.style.setProperty("--app-height", `${height}px`);
+    root.style.setProperty("--vvh", `${height}px`);
+    lastAppliedTop = 0;
+    lastAppliedHeight = height;
+  }
+
+  // keep the message list pinned to the bottom while its height animates
+  function pinMessagesDuring(ms) {
+    if (!ui.messages || !isNearBottom(160)) return;
+    const until = performance.now() + ms;
+    window.cancelAnimationFrame(kbPinFrame);
+    (function tick() {
+      if (ui.messages) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      }
+      if (performance.now() < until) {
+        kbPinFrame = window.requestAnimationFrame(tick);
+      }
+    })();
+  }
+
+  function animateAppHeightTo(height, className, ms) {
+    const app = document.querySelector(".app-root");
+    if (!app || !(height > 0)) return;
+    app.classList.add(className);
+    setAppBox(height);
+    pinMessagesDuring(ms + 120);
+  }
+
+  function startKeyboardOpenAnimation(height) {
+    kbOpening = true;
+    window.clearTimeout(kbOpenTimer);
+    animateAppHeightTo(height, "is-kb-opening", KB_OPEN_MS);
+    kbOpenTimer = window.setTimeout(endKeyboardOpenAnimation, KB_OPEN_MS + 60);
+  }
+
+  function endKeyboardOpenAnimation() {
+    window.clearTimeout(kbOpenTimer);
+    if (!kbOpening) return;
+    kbOpening = false;
+
+    // correct a mismatch (predictive bar, keyboard switch) with the same transition
+    const viewport = window.visualViewport;
+    const actual = viewport ? Math.round(viewport.height * 100) / 100 : 0;
+    if (keyboardIsOpen()) {
+      if (actual > 0 && Math.abs(actual - lastAppliedHeight) > 1) {
+        animateAppHeightTo(actual, "is-kb-opening", KB_OPEN_MS);
+      }
+      saveKeyboardHeight();
+    }
+
+    window.setTimeout(() => {
+      const app = document.querySelector(".app-root");
+      if (app && !kbOpening) {
+        app.classList.remove("is-kb-opening");
+      }
+      ensureViewportWatch(800);
+    }, KB_OPEN_MS);
+  }
+
+  function startKeyboardCloseAnimation() {
+    const app = document.querySelector(".app-root");
+    if (!app) return;
+    const fullHeight = document.documentElement.clientHeight || window.innerHeight;
+    if (fullHeight - lastAppliedHeight < 80) return;
+
+    if (kbOpening) {
+      kbOpening = false;
+      window.clearTimeout(kbOpenTimer);
+      app.classList.remove("is-kb-opening");
+    }
+    kbClosing = true;
+    kbCloseStarted = performance.now();
+    window.clearTimeout(kbCloseTimer);
+    app.classList.add("is-kb-closing");
+    setAppBox(fullHeight);
+    kbCloseTimer = window.setTimeout(() => endKeyboardCloseAnimation(false), KB_CLOSE_MS + 80);
+  }
+
+  function endKeyboardCloseAnimation(force) {
+    window.clearTimeout(kbCloseTimer);
+    if (!kbClosing) return;
+
+    // Safari may still report the keyboard-open height; wait (max 1.2s) to avoid snapping back
+    if (
+      !force &&
+      keyboardIsOpen() &&
+      !isTextField(document.activeElement) &&
+      performance.now() - kbCloseStarted < 1200
+    ) {
+      kbCloseTimer = window.setTimeout(() => endKeyboardCloseAnimation(false), 50);
+      return;
+    }
+
+    kbClosing = false;
+    const app = document.querySelector(".app-root");
+    if (app) {
+      app.classList.remove("is-kb-closing");
+    }
+    ensureViewportWatch(800);
+  }
+
   /* ---------- global events ---------- */
 
   let watchFrame = 0;
@@ -3760,6 +3917,9 @@
   let scrollAfterKeyboard = false;
 
   function updateAppHeight() {
+    if (kbOpening || kbClosing) {
+      return;
+    }
     const viewport = window.visualViewport;
     const rawHeight = viewport && viewport.height ? viewport.height : window.innerHeight;
     const rawTop = viewport ? viewport.offsetTop : 0;
@@ -3834,10 +3994,22 @@
 
   function handleFocusChange(event) {
     const target = event.target;
-    if (!target) return;
-    const tag = target.tagName;
-    if (tag !== "INPUT" && tag !== "TEXTAREA") return;
-    ensureViewportWatch(event.type === "focusin" ? 3000 : 1500);
+    if (!isTextField(target)) return;
+
+    if (event.type === "focusin") {
+      if (kbClosing) {
+        endKeyboardCloseAnimation(true);
+      }
+      ensureViewportWatch(3000);
+      return;
+    }
+
+    // focusout: animate only when focus leaves every text field
+    // (proxy -> textarea handoff has relatedTarget = textarea, so it is skipped)
+    if (IS_IOS && !KEYBOARD_PROXY_DISABLED && !isTextField(event.relatedTarget) && keyboardIsOpen()) {
+      startKeyboardCloseAnimation();
+    }
+    ensureViewportWatch(1500);
   }
 
   function bindAppHeight() {
