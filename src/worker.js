@@ -1,4 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  isAllowedPushEndpoint,
+  isValidSubscriptionKeys,
+  loadVapidKeys,
+  sendWebPush,
+} from "./push.js";
 
 const CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 const CODE_PATTERN = /^[abcdefghjkmnpqrstuvwxyz23456789]{8}$/;
@@ -19,6 +25,13 @@ const MAX_READS = 200;
 const READ_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_JSON_LENGTH = 10000;
 const MAX_RAW_TEXT_LENGTH = 3000;
+
+// Web Push
+const MAX_PUSH_SUBSCRIPTIONS = 100;   // per room
+const MAX_PUSH_PER_MESSAGE = 40;      // keep well below the subrequest limit
+const PUSH_TTL_SECONDS = 24 * 60 * 60;
+const PUSH_BODY_LENGTH = 120;
+const DEFAULT_VAPID_SUBJECT = "mailto:noreply@chocotalk.invalid";
 
 const SEND_WINDOW_MS = 10000;
 const SEND_CLIENT_LIMIT = 20;
@@ -486,6 +499,51 @@ async function updateRoomSettings(request, env, code) {
   return noStore(response);
 }
 
+async function getPushKey(env) {
+  const keys = await loadVapidKeys(env.VAPID_PRIVATE_JWK);
+  if (!keys) return jsonError("プッシュ通知は設定されていません", 404);
+  return json({ publicKey: keys.publicKey });
+}
+
+async function updatePushSubscription(request, env, code) {
+  if (isBodyTooLarge(request)) return jsonError("リクエストが大きすぎます", 413);
+
+  const parsed = await readJson(request);
+  if (parsed.response) return parsed.response;
+  const body = parsed.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return jsonError("リクエストの形式が正しくありません", 400);
+  }
+
+  if (!(await directoryExists(env, code))) {
+    return jsonError("ルームが見つかりません", 404);
+  }
+
+  const response = await roomStub(env, code).fetch("https://room.internal/push", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return noStore(response);
+}
+
+function pushMessageBody(message) {
+  const name = message.name || "ゲスト";
+  let body;
+  if (message.kind === "image") {
+    body = "画像を送信しました";
+  } else if (message.kind === "stamp") {
+    body = typeof message.text === "string" && message.text.trim() ? message.text : "スタンプを送信しました";
+  } else {
+    body = typeof message.text === "string" ? message.text : "";
+  }
+  body = body.replace(/\s+/g, " ").trim();
+  if (charLength(body) > PUSH_BODY_LENGTH) {
+    body = `${Array.from(body).slice(0, PUSH_BODY_LENGTH - 1).join("")}…`;
+  }
+  return `${name}: ${body}`;
+}
+
 async function getMessageMedia(env, code, id) {
   if (!/^[1-9][0-9]*$/.test(id)) {
     return jsonError("メッセージが見つかりません", 404);
@@ -542,6 +600,11 @@ async function handleApi(request, env, url) {
     return createRoom(request, env);
   }
 
+  if (pathname === "/api/push/key") {
+    if (request.method !== "GET") return jsonError("許可されていないメソッドです", 405);
+    return getPushKey(env);
+  }
+
   const mediaMatch = pathname.match(/^\/api\/rooms\/([^/]+)\/messages\/([^/]+)\/media$/);
   if (mediaMatch) {
     const code = mediaMatch[1];
@@ -552,7 +615,7 @@ async function handleApi(request, env, url) {
     return getMessageMedia(env, code, mediaMatch[2]);
   }
 
-  const match = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(close|delete|settings|ws))?$/);
+  const match = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(close|delete|settings|ws|push))?$/);
   if (!match) return jsonError("APIが見つかりません", 404);
 
   const code = match[1];
@@ -584,6 +647,11 @@ async function handleApi(request, env, url) {
   if (action === "ws") {
     if (request.method !== "GET") return jsonError("許可されていないメソッドです", 405);
     return openWebSocket(request, env, code, url);
+  }
+
+  if (action === "push") {
+    if (request.method !== "POST") return jsonError("許可されていないメソッドです", 405);
+    return updatePushSubscription(request, env, code);
   }
 
   return jsonError("APIが見つかりません", 404);
@@ -666,6 +734,15 @@ export class Room extends DurableObject {
           client_id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           last_read_id INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS push_subs (
+          endpoint TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          p256dh TEXT NOT NULL,
+          auth TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         )
       `);
@@ -816,6 +893,8 @@ export class Room extends DurableObject {
         return this.handleDelete(request);
       case "/settings":
         return this.handleSettings(request);
+      case "/push":
+        return this.handlePush(request);
       default:
         return jsonError("内部APIが見つかりません", 404);
     }
@@ -914,6 +993,7 @@ export class Room extends DurableObject {
       role,
       joinedAt: Date.now(),
       ip: url.searchParams.get("ip") ?? "",
+      visible: true,
     });
 
     this.cleanupReads();
@@ -981,6 +1061,7 @@ export class Room extends DurableObject {
     // ソケットへの通知後に容量を解放する
     this.ctx.storage.sql.exec("DELETE FROM messages");
     this.ctx.storage.sql.exec("DELETE FROM reads");
+    this.ctx.storage.sql.exec("DELETE FROM push_subs");
 
     return json({ ok: true });
   }
@@ -1030,6 +1111,7 @@ export class Room extends DurableObject {
     try {
       this.ctx.storage.sql.exec("DELETE FROM messages");
       this.ctx.storage.sql.exec("DELETE FROM reads");
+      this.ctx.storage.sql.exec("DELETE FROM push_subs");
     } catch (error) {
       console.error("削除時のデータ消去に失敗しました:", error);
     }
@@ -1081,6 +1163,124 @@ export class Room extends DurableObject {
     return json({ settings });
   }
 
+  async handlePush(request) {
+    if (request.method !== "POST") {
+      return jsonError("許可されていないメソッドです", 405);
+    }
+    const parsed = await readJson(request);
+    if (parsed.response) return parsed.response;
+    const body = parsed.value;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return jsonError("リクエストの形式が正しくありません", 400);
+    }
+    const row = this.getRoomRow();
+    if (!row || row.deleted) return jsonError("ルームが見つかりません", 404);
+
+    if (body.action === "unsubscribe") {
+      if (typeof body.endpoint !== "string" || body.endpoint.length > 1024) {
+        return jsonError("購読情報が正しくありません", 400);
+      }
+      this.ctx.storage.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", body.endpoint);
+      return json({ ok: true });
+    }
+
+    if (body.action !== "subscribe") {
+      return jsonError("リクエストの形式が正しくありません", 400);
+    }
+    if (row.closed) return jsonError("このルームは既に終了しています", 409);
+    if (typeof body.clientId !== "string" || !CLIENT_ID_PATTERN.test(body.clientId)) {
+      return jsonError("clientIdの形式が正しくありません", 400);
+    }
+    const subscription = body.subscription;
+    const endpoint = subscription && subscription.endpoint;
+    const keys = subscription && subscription.keys;
+    if (!isAllowedPushEndpoint(endpoint)) {
+      return jsonError("この通知サービスには対応していません", 400);
+    }
+    if (!keys || !isValidSubscriptionKeys(keys.p256dh, keys.auth)) {
+      return jsonError("購読情報が正しくありません", 400);
+    }
+
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO push_subs (endpoint, client_id, p256dh, auth, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET
+         client_id = excluded.client_id,
+         p256dh = excluded.p256dh,
+         auth = excluded.auth,
+         updated_at = excluded.updated_at`,
+      endpoint,
+      body.clientId,
+      keys.p256dh,
+      keys.auth,
+      now,
+    );
+    // 上限を超えたら古い購読から削除する
+    this.ctx.storage.sql.exec(
+      "DELETE FROM push_subs WHERE endpoint NOT IN (SELECT endpoint FROM push_subs ORDER BY updated_at DESC LIMIT ?)",
+      MAX_PUSH_SUBSCRIPTIONS,
+    );
+    return json({ ok: true });
+  }
+
+  // 画面を見ていない参加者（送信者本人を除く）へ Web Push を送る
+  async notifyPush(row, sender, message) {
+    let keys;
+    try {
+      keys = await loadVapidKeys(this.env.VAPID_PRIVATE_JWK);
+    } catch {
+      keys = null;
+    }
+    if (!keys) return;
+
+    const subs = this.ctx.storage.sql.exec(
+      "SELECT endpoint, client_id, p256dh, auth FROM push_subs WHERE client_id <> ? ORDER BY updated_at DESC LIMIT ?",
+      sender.clientId,
+      MAX_PUSH_SUBSCRIPTIONS,
+    ).toArray();
+    if (subs.length === 0) return;
+
+    // 画面を表示中のクライアントには WebSocket で届くので送らない
+    const viewing = new Set();
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = getAttachment(ws);
+      if (attachment && attachment.visible !== false) viewing.add(attachment.clientId);
+    }
+    const targets = subs.filter((sub) => !viewing.has(sub.client_id)).slice(0, MAX_PUSH_PER_MESSAGE);
+    if (targets.length === 0) return;
+
+    const payload = JSON.stringify({
+      title: row.name,
+      body: pushMessageBody(message),
+      tag: `kc-${row.code}`,
+      url: `/r/${row.code}`,
+      code: row.code,
+      id: message.id,
+    });
+    const subject = this.env.VAPID_SUBJECT || DEFAULT_VAPID_SUBJECT;
+
+    const results = await Promise.allSettled(targets.map((sub) => sendWebPush({
+      subscription: sub,
+      payload,
+      keys,
+      subject,
+      ttl: PUSH_TTL_SECONDS,
+    })));
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        if (result.value === 404 || result.value === 410) {
+          try {
+            this.ctx.storage.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", targets[index].endpoint);
+          } catch (error) {
+            console.error("push subscription cleanup failed:", error);
+          }
+        }
+      } else {
+        console.error("push send failed:", result.reason);
+      }
+    });
+  }
+
   handleMedia(request, url) {
     if (request.method !== "GET") {
       return jsonError("許可されていないメソッドです", 405);
@@ -1117,7 +1317,7 @@ export class Room extends DurableObject {
     });
   }
 
-  webSocketMessage(ws, raw) {
+  async webSocketMessage(ws, raw) {
     if (typeof raw !== "string") return;
 
     let data;
@@ -1147,7 +1347,10 @@ export class Room extends DurableObject {
 
     switch (data.type) {
       case "send":
-        this.handleSend(ws, attachment, row, data);
+        await this.handleSend(ws, attachment, row, data);
+        break;
+      case "visibility":
+        this.handleVisibility(ws, attachment, data);
         break;
       case "read":
         this.handleRead(ws, attachment, row, data);
@@ -1158,7 +1361,7 @@ export class Room extends DurableObject {
     }
   }
 
-  handleSend(ws, attachment, row, data) {
+  async handleSend(ws, attachment, row, data) {
     const input = data.message;
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       safeSend(ws, { type: "error", message: "メッセージの形式が不正です" });
@@ -1291,6 +1494,23 @@ export class Room extends DurableObject {
     if (readSettings(row.settings).readReceipts) {
       this.setRead(attachment.clientId, attachment.name, inserted.id);
       this.broadcast({ type: "reads", reads: this.getReads() });
+    }
+
+    // 配信と既読の更新が終わってから Push を送る（失敗してもチャットには影響させない）
+    try {
+      await this.notifyPush(row, attachment, { id: inserted.id, name: attachment.name, kind, text });
+    } catch (error) {
+      console.error("push notify failed:", error);
+    }
+  }
+
+  handleVisibility(ws, attachment, data) {
+    if (typeof data.visible !== "boolean") return;
+    if (attachment.visible === data.visible) return;
+    try {
+      ws.serializeAttachment({ ...attachment, visible: data.visible });
+    } catch {
+      // 切断済みのソケットは無視する
     }
   }
 

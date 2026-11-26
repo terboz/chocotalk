@@ -1,7 +1,9 @@
 /* chocotalk service worker: static assets only. API and WebSocket traffic always go to the network. */
 "use strict";
 
-const CACHE_NAME = "chocotalk-static-v5";
+const CACHE_NAME = "chocotalk-static-v6";
+const STATE_CACHE = "chocotalk-state"; // not a static cache: kept across versions
+const BADGE_KEY = "/__badge";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -89,6 +91,62 @@ self.addEventListener("fetch", (event) => {
       return fetchAndCache(request, request);
     })
   );
+});
+
+async function readBadgeCount() {
+  try {
+    const cache = await caches.open(STATE_CACHE);
+    const response = await cache.match(BADGE_KEY);
+    const value = response ? Number(await response.text()) : 0;
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+async function writeBadgeCount(count) {
+  try {
+    const cache = await caches.open(STATE_CACHE);
+    await cache.put(BADGE_KEY, new Response(String(count)));
+  } catch (_error) {
+    /* badge storage is best-effort */
+  }
+}
+
+// Web Push: the server sends { title, body, tag, url } for each new message
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (_error) {
+    data = {};
+  }
+  const title = typeof data.title === "string" && data.title ? data.title : "chocotalk";
+  const body = typeof data.body === "string" && data.body ? data.body : "新着メッセージがあります";
+  const url = new URL(typeof data.url === "string" ? data.url : "/", self.location.origin).href;
+  const options = {
+    body,
+    icon: "/icons/icon-192.png",
+    data: { url }
+  };
+  if (typeof data.tag === "string" && data.tag) {
+    options.tag = data.tag;
+    options.renotify = true; // 同じルームの通知は上書きしつつ毎回知らせる
+  }
+
+  event.waitUntil((async () => {
+    // iOS は Push ごとに必ず通知を表示する必要がある
+    await self.registration.showNotification(title, options);
+    const count = (await readBadgeCount()) + 1;
+    await writeBadgeCount(count);
+    try {
+      if (self.navigator && typeof self.navigator.setAppBadge === "function") {
+        await self.navigator.setAppBadge(count);
+      }
+    } catch (_error) {
+      /* app badges are best-effort */
+    }
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {

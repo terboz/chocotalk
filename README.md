@@ -16,7 +16,7 @@ chocotalk は、Cloudflare Workers + Durable Objects（SQLite）+ 静的アセ�
 - **画像**: クライアント側で長辺 1280px を上限に JPEG 圧縮し、data URL 240,000 文字以下に収めます。元ファイルは 25MB までです。
 - **既読表示**: ホストが ON にすると、自分の発言に既読人数が表示されます。新規ルームでは既定で ON です。OFF にすると現在の既読状態はクリアされ、ON に戻すと各参加者の現在位置から再表示されます。
 - **再接続**: WebSocket が切れると指数バックオフで自動再接続します（最大 15 秒間隔）。
-- **PWA / 通知**: PWA マニフェストと Service Worker があり、簡易通知に対応しています。詳細は「通知の仕組みと制約」を参照してください。
+- **PWA / 通知**: PWA マニフェストと Service Worker があり、Web Push でアプリを閉じていても新着を通知します。詳細は「通知の仕組みと制約」を参照してください。
 - **履歴**: ルームごとに直近 300 件を保存します。参加・再接続時に読み込むのは直近 200 件です。
 - **画像の遅延取得**: 履歴表示時に、画像だけを個別 API から取得します。
 - **閉鎖時の削除**: ルームを閉じると、メッセージと既読データ（画像を含む）を削除します。
@@ -32,8 +32,11 @@ chatroom/
 ├─ package.json
 ├─ package-lock.json
 ├─ wrangler.toml
+├─ scripts/
+│  └─ gen-vapid-key.mjs
 ├─ src/
-│  └─ worker.js
+│  ├─ worker.js
+│  └─ push.js
 └─ public/
    ├─ index.html
    ├─ app.js
@@ -50,8 +53,10 @@ chatroom/
 ```
 
 - `src/worker.js`: Worker の API と、`Room` / `Directory` の Durable Object。
+- `src/push.js`: Web Push の送信（暗号化と VAPID 署名）。Web Crypto だけで実装しています。
+- `scripts/gen-vapid-key.mjs`: Web Push 用の鍵（VAPID）を作るスクリプト。
 - `public/app.js`: 画面、WebSocket 接続、画像圧縮、通知、QR コードなどのクライアント処理。
-- `public/sw.js`: 静的アセットのキャッシュと、通知クリック時の画面オープン。
+- `public/sw.js`: 静的アセットのキャッシュ、Web Push の受信と通知表示、通知クリック時の画面オープン。
 - `wrangler.toml`: 静的アセット、Durable Object のバインディング、migration の設定。
 - `node_modules/` と `.wrangler/` は生成物で、`.gitignore` の対象です。
 
@@ -180,11 +185,29 @@ QR コードはデプロイ後の URL から生成されるため、公開後は
 
 ## 通知の仕組みと制約
 
-- Web Push ではなく、Service Worker + Notification API による簡易通知です。通知にはブラウザの許可が必要です。
-- 新着メッセージを受信したとき、ページが非表示（別タブやバックグラウンド）の場合に通知します。自分のメッセージでは通知しません。
-- ページを完全に閉じる、またはブラウザを終了すると WebSocket が切れるため、通知は届きません。Push 配信は未実装です。
-- iOS で Web アプリの通知を使うには、iOS 16.4 以降で、Safari の「ホーム画面に追加」から開いた PWA である必要があります（Web Push の制約）。本アプリは Push を使わないため、この条件を満たしてもページを閉じた状態では通知されません。
+- 新着メッセージは **Web Push** で通知します。アプリやブラウザを閉じていても届きます。通知にはブラウザの許可が必要です。
+- 通知の内容は「ルーム名」「送信者: 本文」です（画像は「画像を送信しました」）。同じルームの通知は 1 件にまとめて上書きし、届くたびに知らせます。ホーム画面アイコンには未読数のバッジを表示します（対応環境のみ）。
+- 自分のメッセージ、および今そのルームを画面に表示している端末には送りません（ページの表示状態を WebSocket でサーバーに伝えています）。
+- 購読はルームごとに Durable Object の `push_subs` テーブルへ保存します（1 ルーム最大 100 件、1 メッセージあたり最大 40 件に送信）。退出・ルーム閉鎖・削除で消え、無効になった購読（404 / 410）は送信時に自動で消します。
+- **iPhone / iPad**: iOS 16.4 以降で、Safari の共有メニューから「ホーム画面に追加」し、**そのアイコンから開いた状態**でメニューの「通知を有効にする」を押してください。Safari のタブのままでは通知を使えません。
+- **Android**: Chrome などで開いて「通知を有効にする」を押せば、タブでもインストールしたアプリでも届きます。
+- サーバー側で鍵（`VAPID_PRIVATE_JWK`）が設定されていない場合は Web Push を使わず、ページを開いたまま裏に回っているときだけ通知する従来の方式で動きます。
 - ローカル開発では `localhost` なら Service Worker と通知を利用できます。LAN IP の `http` では Service Worker が制限される場合があります。スマートフォン実機で通知まで確認する場合は、デプロイ後の HTTPS URL を使用してください。
+
+### Web Push の設定（最初に 1 回）
+
+1. 鍵を作り、Cloudflare のシークレットに保存します（秘密鍵なので Git には入れません）。
+
+   ```
+   node scripts/gen-vapid-key.mjs | npx wrangler secret put VAPID_PRIVATE_JWK
+   ```
+
+   Cloudflare ダッシュボードの Workers → chocotalk → Settings → Variables and Secrets で、`node scripts/gen-vapid-key.mjs` の出力（1 行の JSON）を `VAPID_PRIVATE_JWK` という名前の Secret として登録しても構いません。
+
+2. `wrangler.toml` の `[vars]` にある `VAPID_SUBJECT` を、連絡先（`https://` の URL か `mailto:` のメールアドレス）にします。
+3. ローカルの `wrangler dev` で試す場合は、`.dev.vars` に `VAPID_PRIVATE_JWK=<出力した JSON>` を書きます（`.gitignore` 済み）。
+
+鍵を作り直すと既存の購読はすべて無効になります。各端末でアプリを開き直すと自動で登録し直されます。
 
 ## よくあるトラブル
 
@@ -192,7 +215,7 @@ QR コードはデプロイ後の URL から生成されるため、公開後は
 | --- | --- |
 | `wrangler` が無出力で落ちる / `0xC0000005` になる | Node.js を 22.21.0 以降（または 24 系）に更新する。または `C:\work\chatroom` のような ASCII のみのパスへ移動する。 |
 | スマートフォンから `localhost` に繋がらない | `npx wrangler dev --ip 0.0.0.0` で起動し、Windows ファイアウォールで Node.js の受信を許可する。スマートフォンでは PC の LAN IP（`http://192.168.x.x:8787`）を開く。 |
-| 通知が出ない | 通知を許可する。HTTPS または `localhost` で開く。ページを開いたままバックグラウンドにしているか確認する。iOS は iOS 16.4 以降 + ホーム画面追加が必要。仕様上、ページを完全に閉じると届かない。 |
+| 通知が出ない | 通知を許可する。HTTPS または `localhost` で開く。iOS は iOS 16.4 以降で、ホーム画面に追加したアイコンから開いて通知を許可する。アプリを閉じても届かない場合は `VAPID_PRIVATE_JWK` が設定されているか確認する（`/api/push/key` が 404 なら未設定）。 |
 | 画像が送れない | 元ファイルが 25MB 以下か確認する。圧縮後の data URL が 240,000 文字を超える場合は送信できないため、別の画像を選ぶ。 |
 | ホスト操作ができない | ホスト権限は `localStorage` の `hostId` に依存する。ブラウザデータを消した場合や別のブラウザでは復元できない。 |
 

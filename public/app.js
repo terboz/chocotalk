@@ -47,7 +47,8 @@
     hasWelcomed: false,
     menuOpen: false,
     sendingImage: false,
-    sendingTimer: null
+    sendingTimer: null,
+    pushActive: false
   };
 
   const ui = {
@@ -1184,6 +1185,7 @@
     if (!confirmed) {
       return;
     }
+    unsubscribeRoomPush(entry.code);
     removeGuestRoom(entry.code);
     if (Array.isArray(guestRows)) {
       const index = guestRows.findIndex((item) => item.entry && item.entry.code === entry.code);
@@ -2685,6 +2687,9 @@
 
   function setAppBadgeCount(count) {
     appBadgeCount = Math.max(0, count);
+    if (appBadgeCount === 0) {
+      resetStoredBadge();
+    }
     const nav = navigator;
     if (typeof nav.setAppBadge !== "function") {
       return;
@@ -2719,7 +2724,11 @@
 
   async function requestNotifications() {
     if (!notificationsSupported()) {
-      showToast("この環境では通知を利用できません。", "error");
+      if (IS_IOS && !isStandaloneDisplay()) {
+        showToast("iPhoneでは、共有メニューの「ホーム画面に追加」で追加したアイコンから開くと通知を使えます。", "error");
+      } else {
+        showToast("この環境では通知を利用できません。", "error");
+      }
       return;
     }
 
@@ -2738,7 +2747,11 @@
         showToast("通知の準備に失敗しました。", "error");
         return;
       }
-      showToast("通知を有効にしました。", "success");
+      const pushed = await syncPushSubscription();
+      showToast(
+        pushed ? "通知を有効にしました。アプリを閉じていても新着をお知らせします。" : "通知を有効にしました。",
+        "success"
+      );
     } else if (permission === "denied") {
       showToast("通知がブロックされています。ブラウザの設定をご確認ください。", "error");
     } else {
@@ -2768,6 +2781,10 @@
 
   function showRoomNotification(message) {
     if (document.visibilityState !== "hidden" || state.closed || !state.room) {
+      return;
+    }
+    if (state.pushActive) {
+      // Web Push が有効なら、通知とバッジは Service Worker が出す（二重通知を防ぐ）
       return;
     }
     setAppBadgeCount(appBadgeCount + 1);
@@ -2809,6 +2826,177 @@
     }).catch(() => {
       /* notifications are best-effort */
     });
+  }
+
+  /* ---------- Web Push ---------- */
+
+  const BADGE_CACHE = "chocotalk-state";
+  const BADGE_KEY = "/__badge";
+  let pushKeyPromise = null;
+
+  function resetStoredBadge() {
+    if (!("caches" in window)) {
+      return;
+    }
+    caches.open(BADGE_CACHE)
+      .then((cache) => cache.put(BADGE_KEY, new Response("0")))
+      .catch(() => {
+        /* badge storage is best-effort */
+      });
+  }
+
+  function isStandaloneDisplay() {
+    return window.navigator.standalone === true ||
+      (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches);
+  }
+
+  function pushSupported() {
+    return notificationsSupported() && "PushManager" in window;
+  }
+
+  function fetchPushKey() {
+    if (!pushKeyPromise) {
+      pushKeyPromise = fetch("/api/push/key", { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data) => (data && typeof data.publicKey === "string" ? data.publicKey : null))
+        .catch(() => null)
+        .then((key) => {
+          if (!key) {
+            pushKeyPromise = null;
+          }
+          return key;
+        });
+    }
+    return pushKeyPromise;
+  }
+
+  function base64UrlToBytes(value) {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "===".slice((normalized.length + 3) % 4);
+    const binary = window.atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  function sameKeyBytes(buffer, bytes) {
+    if (!buffer) {
+      return false;
+    }
+    const current = new Uint8Array(buffer);
+    if (current.length !== bytes.length) {
+      return false;
+    }
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (current[i] !== bytes[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function getPushSubscription(create) {
+    const key = await fetchPushKey();
+    if (!key) {
+      return null;
+    }
+    const registered = await registerServiceWorker();
+    if (!registered) {
+      return null;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    const keyBytes = base64UrlToBytes(key);
+    let subscription = await registration.pushManager.getSubscription();
+    const currentKey = subscription && subscription.options ? subscription.options.applicationServerKey : null;
+    if (subscription && currentKey && !sameKeyBytes(currentKey, keyBytes)) {
+      // サーバーの鍵が変わったら作り直す（鍵を返さないブラウザでは作り直さない）
+      try {
+        await subscription.unsubscribe();
+      } catch (_error) {
+        /* ignore */
+      }
+      subscription = null;
+    }
+    if (!subscription && create) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: keyBytes
+      });
+    }
+    return subscription;
+  }
+
+  // このルームの購読をサーバーに登録する。成功したら true
+  async function syncPushSubscription() {
+    if (!pushSupported() || Notification.permission !== "granted") {
+      state.pushActive = false;
+      return false;
+    }
+    const code = state.roomCode;
+    const clientId = state.clientId;
+    if (!code || !clientId || state.closed) {
+      return false;
+    }
+    try {
+      const subscription = await getPushSubscription(true);
+      if (!subscription) {
+        if (state.roomCode === code) {
+          state.pushActive = false;
+        }
+        return false;
+      }
+      const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/push`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "subscribe", clientId, subscription: subscription.toJSON() })
+      });
+      if (state.roomCode === code) {
+        state.pushActive = response.ok;
+      }
+      return response.ok;
+    } catch (_error) {
+      if (state.roomCode === code) {
+        state.pushActive = false;
+      }
+      return false;
+    }
+  }
+
+  function unsubscribeRoomPush(code) {
+    if (!pushSupported() || !code) {
+      return;
+    }
+    navigator.serviceWorker.getRegistration().then((registration) => {
+      if (!registration) {
+        return null;
+      }
+      return registration.pushManager.getSubscription();
+    }).then((subscription) => {
+      if (!subscription) {
+        return null;
+      }
+      return fetch(`/api/rooms/${encodeURIComponent(code)}/push`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "unsubscribe", endpoint: subscription.endpoint })
+      });
+    }).catch(() => {
+      /* best-effort */
+    });
+  }
+
+  function sendVisibility() {
+    const socket = state.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      socket.send(JSON.stringify({ type: "visibility", visible: document.visibilityState === "visible" }));
+    } catch (_error) {
+      /* the socket is closing */
+    }
   }
 
   /* ---------- closed room ---------- */
@@ -2931,6 +3119,7 @@
       state.wsStatus = "open";
       state.reconnectAttempt = 0;
       updateConnectionUI();
+      sendVisibility();
     };
 
     socket.onmessage = (event) => {
@@ -3052,6 +3241,9 @@
       if (state.room && state.room.closed) {
         handleRoomClosed();
         return;
+      }
+      if (firstWelcome) {
+        syncPushSubscription();
       }
       scheduleRead(READ_DEBOUNCE_MS);
       return;
@@ -3228,7 +3420,7 @@
       renameForm
     ));
 
-    if (notificationsSupported()) {
+    if (notificationsSupported() || (IS_IOS && !isStandaloneDisplay())) {
       const notificationRow = h("div", { className: "menu-notification" });
       const notificationButton = h("button", {
         className: "menu-action",
@@ -3401,9 +3593,16 @@
     let title = "通知を有効にする";
     let subtitle = "ブラウザを表示していないときに新着をお知らせします。";
     let icon = "🔔";
-    if (Notification.permission === "granted") {
+    if (!notificationsSupported()) {
+      // iPhone の Safari タブ: ホーム画面に追加したアプリでのみ通知を使える
+      title = "ホーム画面に追加すると通知を使えます";
+      subtitle = "共有メニューの「ホーム画面に追加」で追加したアイコンから開いてください。";
+      icon = "📲";
+    } else if (Notification.permission === "granted") {
       title = "通知は有効です";
-      subtitle = "新着メッセージを端末に通知します。";
+      subtitle = state.pushActive
+        ? "アプリを閉じていても新着メッセージを通知します。"
+        : "新着メッセージを端末に通知します。";
       icon = "🔕";
     } else if (Notification.permission === "denied") {
       title = "通知がブロックされています";
@@ -4020,6 +4219,7 @@
   }
 
   function handleVisibilityChange() {
+    sendVisibility();
     if (document.visibilityState === "visible") {
       clearUnread();
       scheduleRead(0);

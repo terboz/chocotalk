@@ -2,6 +2,11 @@ name = "chocotalk"
 main = "src/worker.js"
 compatibility_date = "2026-11-01"
 
+[vars]
+# Web Push (VAPID) の連絡先。https:// の URL か mailto: のアドレス
+VAPID_SUBJECT = "https://chocotalk.terboz.workers.dev"
+# 秘密鍵 VAPID_PRIVATE_JWK は Secret で設定する（README「Web Push の設定」参照）
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
