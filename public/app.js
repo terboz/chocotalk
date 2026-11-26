@@ -139,6 +139,40 @@
     }
   }
 
+  // ルームごとの参加情報（clientId と表示名）。
+  // iPhone のホーム画面アプリは起動のたびに sessionStorage が消えるため、localStorage にも保存する。
+  function roomIdentityGet(key) {
+    const value = sessionGet(key);
+    if (value) {
+      return value;
+    }
+    const stored = localGet(key);
+    if (stored) {
+      sessionSet(key, stored);
+    }
+    return stored;
+  }
+
+  function roomIdentitySet(key, value) {
+    sessionSet(key, value);
+    localSet(key, value);
+  }
+
+  function roomIdentityClear(code) {
+    [`kc_cid_${code}`, `kc_name_${code}`].forEach((key) => {
+      try {
+        window.sessionStorage.removeItem(key);
+      } catch (_error) {
+        /* sessionStorage unavailable */
+      }
+      try {
+        window.localStorage.removeItem(key);
+      } catch (_error) {
+        /* localStorage unavailable */
+      }
+    });
+  }
+
   function getHostId() {
     let hostId = localGet(HOST_ID_KEY);
     if (!hostId) {
@@ -1193,11 +1227,7 @@
         guestRows.splice(index, 1);
       }
     }
-    try {
-      window.sessionStorage.removeItem(`kc_cid_${entry.code}`);
-    } catch (_error) {
-      /* sessionStorage unavailable */
-    }
+    roomIdentityClear(entry.code);
     if (row.isConnected) {
       row.remove();
     }
@@ -1379,8 +1409,8 @@
         return;
       }
 
-      const savedClientId = sessionGet(`kc_cid_${canonicalCode}`);
-      const savedName = sessionGet(`kc_name_${canonicalCode}`);
+      const savedClientId = roomIdentityGet(`kc_cid_${canonicalCode}`);
+      const savedName = roomIdentityGet(`kc_name_${canonicalCode}`);
       if (savedClientId && savedName) {
         state.clientId = savedClientId;
         state.selfName = savedName;
@@ -1583,12 +1613,12 @@
 
       const clientKey = `kc_cid_${state.roomCode}`;
       const nameKey = `kc_name_${state.roomCode}`;
-      let clientId = sessionGet(clientKey);
+      let clientId = roomIdentityGet(clientKey);
       if (!clientId) {
         clientId = makeId();
       }
-      sessionSet(clientKey, clientId);
-      sessionSet(nameKey, name);
+      roomIdentitySet(clientKey, clientId);
+      roomIdentitySet(nameKey, name);
       state.clientId = clientId;
       state.selfName = name;
       startChat();
@@ -3199,7 +3229,7 @@
         state.self = data.self;
         if (typeof data.self.name === "string" && data.self.name) {
           state.selfName = data.self.name;
-          sessionSet(`kc_name_${state.roomCode}`, state.selfName);
+          roomIdentitySet(`kc_name_${state.roomCode}`, state.selfName);
         }
         if (data.self.role === "host") {
           state.isHost = true;
@@ -3405,7 +3435,7 @@
       if (state.self) {
         state.self.name = name;
       }
-      sessionSet(`kc_name_${state.roomCode}`, name);
+      roomIdentitySet(`kc_name_${state.roomCode}`, name);
       renameInput.value = name;
       const profileName = document.getElementById("menu-profile-name");
       if (profileName) {
@@ -4221,6 +4251,7 @@
   function handleVisibilityChange() {
     sendVisibility();
     if (document.visibilityState === "visible") {
+      consumePendingOpen();
       clearUnread();
       scheduleRead(0);
     } else {
@@ -4291,6 +4322,75 @@
     hideStampPopover();
   }
 
+  /* ---------- open a room from a notification tap ---------- */
+
+  const OPEN_KEY = "/__open";
+  const OPEN_MAX_AGE_MS = 60000;
+
+  function notificationTargetPath(url) {
+    try {
+      const target = new URL(url, window.location.origin);
+      if (target.origin !== window.location.origin) {
+        return null;
+      }
+      return /^\/r\/[A-Za-z0-9]{1,32}$/.test(target.pathname) || target.pathname === "/" ? target.pathname : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function openFromNotification(url) {
+    const path = notificationTargetPath(url);
+    if (!path) {
+      return;
+    }
+    if (window.location.pathname !== path) {
+      navigate(path);
+    }
+  }
+
+  // iOS can open the app at start_url instead of the notification URL:
+  // the service worker leaves the target in the cache and the app picks it up here.
+  function consumePendingOpen() {
+    if (!("caches" in window)) {
+      return;
+    }
+    caches.open(BADGE_CACHE).then(async (cache) => {
+      const response = await cache.match(OPEN_KEY);
+      if (!response) {
+        return;
+      }
+      await cache.delete(OPEN_KEY);
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (_error) {
+        data = null;
+      }
+      if (data && typeof data.url === "string" && Date.now() - Number(data.at) < OPEN_MAX_AGE_MS) {
+        openFromNotification(data.url);
+      }
+    }).catch(() => {
+      /* best-effort */
+    });
+  }
+
+  function bindNotificationOpen() {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.type !== "kc-open" || typeof data.url !== "string") {
+        return;
+      }
+      if ("caches" in window) {
+        caches.open(BADGE_CACHE).then((cache) => cache.delete(OPEN_KEY)).catch(() => {});
+      }
+      openFromNotification(data.url);
+    });
+  }
+
   function init() {
     ui.app = document.getElementById("app");
     if (!ui.app) {
@@ -4299,6 +4399,7 @@
 
     bindAppHeight();
     registerServiceWorker();
+    bindNotificationOpen();
     window.addEventListener("popstate", applyRoute);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("focus", handleWindowFocus);
@@ -4307,6 +4408,7 @@
     document.addEventListener("pointerdown", handleDocumentPointerDown, { passive: true });
 
     applyRoute();
+    consumePendingOpen();
   }
 
   if (document.readyState === "loading") {

@@ -1,9 +1,10 @@
 /* chocotalk service worker: static assets only. API and WebSocket traffic always go to the network. */
 "use strict";
 
-const CACHE_NAME = "chocotalk-static-v6";
+const CACHE_NAME = "chocotalk-static-v7";
 const STATE_CACHE = "chocotalk-state"; // not a static cache: kept across versions
 const BADGE_KEY = "/__badge";
+const OPEN_KEY = "/__open";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -151,18 +152,42 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = (event.notification.data && event.notification.data.url) || new URL("/", self.location.origin).href;
+  const rawUrl = (event.notification.data && event.notification.data.url) || "/";
+  const targetUrl = new URL(rawUrl, self.location.origin).href;
+  const targetPath = new URL(targetUrl).pathname;
 
-  event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
-      const targetClient = clientList.find((client) => client.url === targetUrl);
-      if (targetClient && "focus" in targetClient) {
-        return targetClient.focus();
+  event.waitUntil((async () => {
+    // アプリが start_url で起動した場合に備えて、開く先を残しておく（アプリ側で 60 秒以内なら移動）
+    try {
+      const cache = await caches.open(STATE_CACHE);
+      await cache.put(OPEN_KEY, new Response(JSON.stringify({ url: targetUrl, at: Date.now() }), {
+        headers: { "content-type": "application/json" }
+      }));
+    } catch (_error) {
+      /* best-effort */
+    }
+
+    const clientList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const sameRoom = clientList.find((client) => new URL(client.url).pathname === targetPath);
+    const target = sameRoom || clientList[0];
+    if (target) {
+      // 開いているアプリをそのトークへ移動させてから前面に出す
+      if (!sameRoom) {
+        try {
+          target.postMessage({ type: "kc-open", url: targetUrl });
+        } catch (_error) {
+          /* ignore */
+        }
       }
-      if (self.clients.openWindow) {
-        return self.clients.openWindow(targetUrl);
+      try {
+        await target.focus();
+        return;
+      } catch (_error) {
+        /* fall back to opening a window */
       }
-      return null;
-    })
-  );
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(targetUrl);
+    }
+  })());
 });
